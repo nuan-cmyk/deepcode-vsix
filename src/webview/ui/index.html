@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DeepSeek Code Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Top Navigation Header -->
+  <header class="top-nav">
+    <div class="top-nav-left">
+      <button id="drawerToggleBtn" class="icon-btn" title="Проекты и диалоги">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="6" x2="21" y2="6"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+      </button>
+
+      <button id="activeProjectBadge" class="project-badge-pill" title="Текущий рабочий проект">
+        <span class="project-badge-icon">📁</span>
+        <span id="activeProjectName">Default Project</span>
+      </button>
+
+      <div class="chat-title-container">
+        <input type="text" id="chatTitleInput" class="chat-title-input" value="Untitled" title="Нажмите для переименования диалога" />
+      </div>
+    </div>
+
+    <div class="nav-actions">
+      <button id="settingsBtn" class="icon-btn" title="Настройки подключения (Сервер и API-токен)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
+      <button id="newChatBtn" class="icon-btn" title="Новый диалог в текущем проекте">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Side / Dropdown Projects & Chats Drawer (Exact Replica of Screenshot 5) -->
+  <div id="historyDrawer" class="history-drawer">
+    <div class="drawer-header">
+      <button id="drawerNewChatBtn" class="drawer-new-chat-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+        <span>New Conversation</span>
+      </button>
+
+      <div class="drawer-nav-item">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+        <span>Conversation History</span>
+      </div>
+
+      <div class="drawer-nav-item">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 14 10"></polyline>
+        </svg>
+        <span>Scheduled Tasks</span>
+      </div>
+    </div>
+
+    <!-- Projects Section Header -->
+    <div class="drawer-section-header">
+      <span class="drawer-section-title">Projects</span>
+      <div class="drawer-section-actions">
+        <button id="createProjectBtn" class="icon-btn" title="Создать новый проект">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            <line x1="12" y1="11" x2="12" y2="17"></line>
+            <line x1="9" y1="14" x2="15" y2="14"></line>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Tree View for Projects & Nested Chats -->
+    <div id="projectsTreeList" class="projects-tree"></div>
+
+    <!-- Drawer Footer -->
+    <div class="drawer-footer">
+      <button id="drawerSettingsBtn" class="drawer-nav-item">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span>Settings</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Create Project Modal -->
+  <div id="createProjectModal" class="auth-modal" style="display: none;">
+    <div class="auth-modal-content">
+      <div class="auth-modal-header">
+        <div class="auth-modal-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            <line x1="12" y1="11" x2="12" y2="17"></line>
+            <line x1="9" y1="14" x2="15" y2="14"></line>
+          </svg>
+          Создать новый проект
+        </div>
+        <button id=\"closeCreateProjectModalBtn\" class=\"icon-btn\">&times;</button>
+      </div>
+      <div class="auth-modal-body">
+        <label for="projectNameInput">Название проекта:</label>
+        <input type="text" id="projectNameInput" class="auth-input" placeholder="Например: Deepseek-API" />
+
+        <label for="projectPathInput" style="margin-top: 12px;">Путь к папке на диске:</label>
+        <div style="display: flex; gap: 6px; margin-top: 4px;">
+          <input type="text" id="projectPathInput" class="auth-input" placeholder="Y:\Deepseek-API" style="flex: 1;" />
+          <button id="browseProjectPathBtn" class="test-conn-btn" style="white-space: nowrap;">Обзор...</button>
+        </div>
+
+        <div class="auth-modal-actions" style="margin-top: 18px;">
+          <button id="saveProjectBtn" class="auth-save-btn">Создать проект</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal Overlay -->
+  <div id="settingsModal" class="auth-modal" style="display: none;">
+    <div class="auth-modal-content">
+      <div class="auth-modal-header">
+        <div class="auth-modal-title">
+          <svg class="deepseek-icon" viewBox="0 0 24 24" width="18" height="18" fill="#ffffff" fill-rule="evenodd">
+            <path d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z"/>
+          </svg>
+          Настройки DeepSeek
+        </div>
+        <button id="closeSettingsModalBtn" class="icon-btn">&times;</button>
+      </div>
+      <div class="auth-modal-body">
+        <label for="serverUrlInput">Адрес сервера (Server Base URL):</label>
+        <input type="text" id="serverUrlInput" class="auth-input" value="https://api.thenck4.ru/v1" />
+
+        <label for="tokenSetupInput" style="margin-top: 12px;">API-токен (DeepAuth Token):</label>
+        <input type="password" id="tokenSetupInput" class="auth-input" placeholder="sk-..." />
+
+        <label for="modelSettingSelect" style="margin-top: 12px;">Модель по умолчанию:</label>
+        <select id="modelSettingSelect" class="auth-input" style="cursor: pointer;">
+          <option value="deepseek-chat">deepseek-chat</option>
+          <option value="deepseek-reasoner">deepseek-reasoner (R1)</option>
+        </select>
+
+        <div id="healthStatusRow" class="health-status-row" style="margin-top: 14px;">
+          <button id="testConnectionBtn" class="test-conn-btn">Проверить соединение</button>
+          <span id="healthStatusText" class="health-status-text"></span>
+        </div>
+
+        <div class="auth-modal-actions">
+          <button id="tokenSetupSaveBtn" class="auth-save-btn">Сохранить и подключиться</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat Messages Stream -->
+  <main id="chatContainer" class="chat-container">
+    <!-- Unauthenticated Onboarding Card -->
+    <div id="onboardingBanner" class="onboarding-card" style="display: none;">
+      <div class="onboarding-icon">
+        <svg viewBox="0 0 24 24" width="36" height="36" fill="#ffffff" fill-rule="evenodd">
+          <path d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z"/>
+        </svg>
+      </div>
+      <h3>Подключение к DeepSeek</h3>
+      <p>Сервер: <code>https://api.thenck4.ru/v1</code></p>
+      <div class="onboarding-input-row">
+        <input type="password" id="onboardingTokenInput" class="auth-input" placeholder="Вставьте ваш sk-... токен" />
+        <button id="onboardingSaveBtn" class="auth-save-btn">Подключить</button>
+      </div>
+    </div>
+
+    <!-- Empty State -->
+    <div id="emptyState" class="empty-state">
+      <div class="deepseek-brand">
+        <svg class="deepseek-logo-svg" viewBox="0 0 24 24" width="22" height="22" fill="#ffffff" fill-rule="evenodd">
+          <path d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z"/>
+        </svg>
+        <span class="deepseek-brand-text">DeepSeek Code</span>
+      </div>
+
+      <div class="whale-emblem-wrapper">
+        <div class="whale-emblem">
+          <svg viewBox="0 0 24 24" width="46" height="46" fill="#ffffff" fill-rule="evenodd">
+            <path d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z"/>
+          </svg>
+        </div>
+      </div>
+
+      <div class="shortcut-hint">
+        Сервер: <code id="serverIndicator">https://api.thenck4.ru/v1</code>
+      </div>
+    </div>
+
+    <!-- Active messages container -->
+    <div id="messagesList"></div>
+
+    <!-- Continue button row -->
+    <div id="continueRow" class="continue-btn-row" style="display: none;">
+      <button id="continueBtn" class="continue-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="5 3 19 12 5 21 5 3"></polygon>
+        </svg>
+        Продолжить
+      </button>
+    </div>
+  </main>
+
+  <!-- Floating Composer Bar -->
+  <footer class="composer-wrapper">
+    <div class="composer-box">
+      <textarea
+        id="promptInput"
+        class="composer-textarea"
+        placeholder="Сообщение для DeepSeek (Ctrl+Esc для фокуса)"
+        rows="1"
+      ></textarea>
+
+      <!-- Bottom Toolbar (Exact 4 Mode Toggles from Web Chat) -->
+      <div class="composer-toolbar">
+        <div class="composer-toolbar-left">
+          <!-- 1. Dead Mode Toggle -->
+          <button id="toggleDead" type="button" class="mode-pill" title="Dead mode: системный промпт из promt/message.txt">
+            <span class="mode-pill-icon">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M0 0h16v12h-2v4H2v-4H0V0zm2 2v8h2v4h1v-2h2v2h2v-2h2v2h1v-4h2V2H2zm6 6l1.414 1.414-.707.707L8 9.414l-.707.707-.707-.707L8 8zm2-3h2v2h-2V5zM4 5h2v2H4V5z" fill-rule="evenodd"/>
+              </svg>
+            </span>
+            <span>Dead</span>
+          </button>
+
+          <!-- 2. Agent Mode Toggle -->
+          <button id="toggleAgent" type="button" class="mode-pill active" title="Агент-режим: создание файлов, правка кода, выполнение терминальных команд">
+            <span class="mode-pill-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="10" rx="2"></rect>
+                <circle cx="12" cy="5" r="2"></circle>
+                <path d="M12 7v4"></path>
+                <line x1="8" y1="16" x2="8" y2="16"></line>
+                <line x1="16" y1="16" x2="16" y2="16"></line>
+              </svg>
+            </span>
+            <span>Agent</span>
+          </button>
+
+          <!-- 3. Thinking Mode Toggle -->
+          <button id="toggleThinking" type="button" class="mode-pill active" title="Режим глубоких пошаговых рассуждений (DeepThink R1)">
+            <span class="mode-pill-icon">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M8 6.77C8.68 6.77 9.23 7.32 9.23 8C9.23 8.68 8.68 9.23 8 9.23C7.32 9.23 6.77 8.68 6.77 8C6.77 7.32 7.32 6.77 8 6.77Z" fill="currentColor"/>
+                <path d="M10.73 10.73C7.53 13.94 3.71 15.31 2.2 13.8C0.69 12.29 2.07 8.47 5.27 5.27C8.48 2.06 12.29 0.69 13.8 2.2C15.31 3.71 13.94 7.53 10.73 10.73Z" stroke="currentColor" stroke-width="1.3"/>
+                <path d="M10.73 5.27C13.94 8.47 15.31 12.29 13.8 13.8C12.29 15.31 8.48 13.94 5.27 10.73C2.06 7.53 0.69 3.71 2.2 2.2C3.71 0.69 7.53 2.06 10.73 5.27Z" stroke="currentColor" stroke-width="1.3"/>
+              </svg>
+            </span>
+            <span>Мышление</span>
+          </button>
+
+          <!-- 4. Search Mode Toggle -->
+          <button id="toggleSearch" type="button" class="mode-pill" title="Поиск актуальной информации в интернете">
+            <span class="mode-pill-icon">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M8 14.85C9.6 14.85 10.89 11.78 10.89 8C10.89 4.22 9.6 1.15 8 1.15" stroke="currentColor" stroke-width="1.3"/>
+                <path d="M8 14.85C6.4 14.85 5.11 11.78 5.11 8C5.11 4.22 6.4 1.15 8 1.15" stroke="currentColor" stroke-width="1.3"/>
+                <path d="M8 1.15C11.78 1.15 14.85 4.22 14.85 8C14.85 11.78 11.78 14.85 8 14.85C4.22 14.85 1.15 11.78 1.15 8C1.15 4.22 4.22 1.15 8 1.15Z" stroke="currentColor" stroke-width="1.3"/>
+                <path d="M1.64 8H14.36" stroke="currentColor" stroke-width="1.3"/>
+              </svg>
+            </span>
+            <span>Поиск</span>
+          </button>
+        </div>
+
+        <div class="composer-toolbar-right">
+          <button id="attachContextBtn" class="icon-btn" title="Прикрепить файл в контекст">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M5.55 9.75V5h1.4v4.75a1.05 1.05 0 0 0 2.1 0V4.5a2.75 2.75 0 1 0-5.5 0V9.75a4.45 4.45 0 0 0 8.9 0V4h1.4v5.75a5.85 5.85 0 0 1-11.7 0V4.5a4.15 4.15 0 0 1 8.3 0V9.75a2.45 2.45 0 0 1-4.9 0z"/>
+            </svg>
+          </button>
+
+          <button id="sendBtn" class="send-btn" title="Отправить (Enter)">
+            <svg id="sendIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="12" y1="19" x2="12" y2="5"></line>
+              <polyline points="5 12 12 5 19 12"></polyline>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
