@@ -14,7 +14,7 @@ Autonomy requires continuous validation. When code is modified:
      - TypeScript/Node: `npm test` or `npx tsc --noEmit`
      - Rust: `cargo check` or `cargo test`
      - Go: `go test ./...`
-3. **Loop Until Clean ("Все ОК")**:
+3. **Loop Until Clean ("All OK")**:
    - If tests fail, parse the traceback/failure, locate the faulty logic, fix it, and re-run.
    - Do NOT terminate the agent turn until the test suite passes or no errors remain.
    - Report the successful verification outcome cleanly to the user.

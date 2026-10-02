@@ -2,9 +2,39 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
-import { ToolDefinition } from '../agent/types';
+import { ToolDefinition, SandboxMode, CommandPermissionRequest } from '../agent/types';
+import { logger } from '../logger';
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read file contents or specific lines from the workspace (e.g. lines 1-65 for imports and definitions).',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Relative or absolute path to the file' },
+          start_line: { type: 'number', description: 'Starting line number (1-indexed)' },
+          end_line: { type: 'number', description: 'Ending line number (1-indexed)' }
+        },
+        required: ['path']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_files',
+      description: 'List project files and directories in the workspace to discover project structure.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Optional directory path or folder to list' }
+        }
+      }
+    }
+  },
   {
     type: 'function',
     function: {
@@ -100,6 +130,20 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'ask_user',
+      description: 'Ask the user a clarifying question or request confirmation/input when requirements are ambiguous. Pauses autonomous execution.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: 'The question or confirmation prompt for the user' }
+        },
+        required: ['question']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_diagnostics',
       description: 'Retrieve active language server diagnostics (syntax errors, type issues, linter warnings) from VS Code.',
       parameters: {
@@ -129,6 +173,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
 export class ToolExecutor {
   private workspaceRoot: string;
   private extensionContext: vscode.ExtensionContext;
+  public commandTimeoutMs: number = 180000;
 
   constructor(context: vscode.ExtensionContext) {
     this.extensionContext = context;
@@ -150,14 +195,144 @@ export class ToolExecutor {
     if (path.isAbsolute(targetPath)) {
       return targetPath;
     }
-    return path.join(this.workspaceRoot, targetPath);
+    const direct = path.join(this.workspaceRoot, targetPath);
+    if (fs.existsSync(direct)) {
+      return direct;
+    }
+    // Only search by basename if targetPath is a bare filename without directory components
+    const hasDir = targetPath.includes('/') || targetPath.includes('\\');
+    if (!hasDir) {
+      const candidate = this.findFileByBasename(this.workspaceRoot, targetPath);
+      if (candidate) {
+        return candidate;
+      }
+    }
+    return direct;
   }
 
-  public async execute(name: string, args: any, taskId?: string, signal?: AbortSignal): Promise<{ output: string; error?: boolean }> {
+  private findFileByBasename(dir: string, targetPath: string, depth: number = 0): string | null {
+    if (depth > 6 || !fs.existsSync(dir)) return null;
+    const normTarget = targetPath.replace(/\\/g, '/');
+    const targetBase = path.basename(normTarget);
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'build' || entry.name === '.git') {
+          continue;
+        }
+        const full = path.join(dir, entry.name);
+        if (entry.isFile()) {
+          const rel = path.relative(this.workspaceRoot, full).replace(/\\/g, '/');
+          if (rel.endsWith(normTarget) || entry.name.toLowerCase() === targetBase.toLowerCase()) {
+            return full;
+          }
+        } else if (entry.isDirectory()) {
+          const sub = this.findFileByBasename(full, targetPath, depth + 1);
+          if (sub) return sub;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  public isPathInsideWorkspace(targetPath: string): boolean {
+    if (!targetPath) return true;
+    try {
+      const full = path.resolve(this.resolvePath(targetPath));
+      const root = path.resolve(this.workspaceRoot);
+      const rel = path.relative(root, full);
+      return !rel.startsWith('..') && !path.isAbsolute(rel);
+    } catch {
+      return false;
+    }
+  }
+
+  public async execute(
+    name: string,
+    args: any,
+    taskId?: string,
+    signal?: AbortSignal,
+    options?: {
+      sandboxMode?: SandboxMode;
+      allowedCommands?: string[];
+      onPermissionRequest?: (req: CommandPermissionRequest) => Promise<'run_once' | 'always_allow' | 'deny'>;
+    }
+  ): Promise<{ output: string; error?: boolean }> {
     if (signal?.aborted) {
       return { output: 'Operation cancelled by user', error: true };
     }
+
+    const sandbox = options?.sandboxMode || 'local';
+
+    // 1. Sandbox Path Containment (local, helper, ask)
+    if (sandbox !== 'bypass') {
+      const targetPath = args.path || args.folder || args.filePath;
+      if (targetPath && !this.isPathInsideWorkspace(targetPath)) {
+        return {
+          output: `[Sandbox Security Error] Access denied: Path "${targetPath}" is outside the active workspace project.`,
+          error: true
+        };
+      }
+    }
+
+    // 2. Sandbox Mode Restrictions
+    const isWriteTool = ['replace_file_content', 'edit_file', 'write_file', 'create_file'].includes(name);
+    const isCommandTool = ['run_terminal_command', 'run_command'].includes(name);
+
+    if (sandbox === 'ask') {
+      if (isWriteTool) {
+        return {
+          output: '[Sandbox Error] File modifications are disabled in Ask mode (Ask mode is Read-Only: r--).',
+          error: true
+        };
+      }
+      if (isCommandTool) {
+        return {
+          output: '[Sandbox Error] Command execution is disabled in Ask mode (Ask mode is Read-Only: r--).',
+          error: true
+        };
+      }
+    } else if (sandbox === 'helper') {
+      if (isCommandTool) {
+        return {
+          output: '[Sandbox Error] Command execution is disabled in Helper mode (Helper mode allows only file read and write operations: rw-).',
+          error: true
+        };
+      }
+    } else if (sandbox === 'local') {
+      if (isCommandTool) {
+        if (args.cwd && !this.isPathInsideWorkspace(args.cwd)) {
+          return {
+            output: `[Sandbox Security Error] Working directory "${args.cwd}" is outside the active workspace project.`,
+            error: true
+          };
+        }
+
+        const cmdStr = (args.command || '').trim();
+        const isWhitelisted = options?.allowedCommands?.some(c => c.trim() === cmdStr);
+
+        if (!isWhitelisted && options?.onPermissionRequest) {
+          const decision = await options.onPermissionRequest({
+            requestId: 'perm_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+            command: cmdStr,
+            cwd: args.cwd || this.workspaceRoot
+          });
+
+          if (decision === 'deny') {
+            return {
+              output: `[Sandbox] Execution of command "${cmdStr}" was denied by user.`,
+              error: true
+            };
+          }
+        }
+      }
+    }
+
+    const execStart = Date.now();
+    logger.log('Tool', `[${name}] Starting execution...`);
+
     try {
+      let toolResult: { output: string; error?: boolean };
       switch (name) {
         case 'view_file_slice':
         case 'read_file': {
@@ -187,36 +362,62 @@ export class ToolExecutor {
             eLine = Number(args.endLine ?? args.end_line ?? args.end);
           }
 
-          return await this.viewFileSlice(filePath, sLine, eLine);
+          toolResult = await this.viewFileSlice(filePath, sLine, eLine);
+          break;
         }
         case 'replace_file_content':
         case 'edit_file':
-          return await this.replaceFileContent(
+          toolResult = await this.replaceFileContent(
             args.path,
             args.targetContent ?? args.search ?? args.target ?? '',
             args.replacementContent ?? args.replace ?? args.replacement ?? ''
           );
+          break;
         case 'write_file':
         case 'create_file': {
           const overwrite = args.overwrite !== undefined ? Boolean(args.overwrite) : false;
-          return await this.writeFile(args.path, args.content || '', overwrite);
+          toolResult = await this.writeFile(args.path, args.content || '', overwrite);
+          break;
         }
         case 'list_workspace_files':
         case 'list_files':
-          return await this.listWorkspaceFiles(args.folder || args.path, args.recursive);
+          toolResult = await this.listWorkspaceFiles(args.folder || args.path, args.recursive);
+          break;
         case 'search_files':
-          return await this.searchFiles(args.query, args.filePattern);
+          toolResult = await this.searchFiles(args.query, args.filePattern);
+          break;
         case 'run_terminal_command':
         case 'run_command':
-          return await this.runTerminalCommand(args.command, args.cwd, args.taskId || taskId, signal);
+          toolResult = await this.runTerminalCommand(args.command, args.cwd, args.taskId || taskId, signal);
+          break;
         case 'get_diagnostics':
-          return await this.getDiagnostics(args.filePath);
+          toolResult = await this.getDiagnostics(args.filePath);
+          break;
         case 'read_rule':
-          return await this.readRule(args.ruleName);
+          toolResult = await this.readRule(args.ruleName);
+          break;
+        case 'ask_user':
+        case 'ask_question':
+        case 'confirm':
+        case 'notify_user': {
+          const q = args.question || args.prompt || args.message || (typeof args === 'string' ? args : '');
+          toolResult = {
+            output: q ? `[Вопрос пользователю] ${q}` : 'Ожидание ответа пользователя.',
+            error: false
+          };
+          break;
+        }
         default:
-          return { output: `Unknown tool: ${name}`, error: true };
+          toolResult = { output: `Tool '${name}' not available. Available tools: replace_file_content, write_file, view_file_slice, run_terminal_command, ask_user.`, error: false };
+          break;
       }
+
+      const dur = ((Date.now() - execStart) / 1000).toFixed(2);
+      logger.log('Tool', `[${name}] Completed in ${dur}s${toolResult.error ? ' (ERROR)' : ''}`);
+      return toolResult;
     } catch (err: any) {
+      const dur = ((Date.now() - execStart) / 1000).toFixed(2);
+      logger.log('Tool', `[${name}] Failed in ${dur}s: ${err.message || String(err)}`);
       return { output: `Tool execution failed: ${err.message || String(err)}`, error: true };
     }
   }
@@ -399,7 +600,8 @@ export class ToolExecutor {
   }
 
   private async writeFile(filePath: string, content: string, overwrite: boolean): Promise<{ output: string; error?: boolean }> {
-    const fullPath = this.resolvePath(filePath);
+    // When creating or writing a file, strictly use the explicit path, never resolving to existing files in other folders
+    const fullPath = path.isAbsolute(filePath) ? filePath : path.join(this.workspaceRoot, filePath);
     const exists = fs.existsSync(fullPath);
 
     if (exists) {
@@ -522,20 +724,27 @@ export class ToolExecutor {
   private async runTerminalCommand(command: string, cwd?: string, taskId?: string, signal?: AbortSignal): Promise<{ output: string; error?: boolean; taskId?: string }> {
     const workDir = cwd ? this.resolvePath(cwd) : this.workspaceRoot;
     const currentTaskId = taskId || 'task_' + Date.now();
+    const cmdStartTime = Date.now();
 
     if (signal?.aborted) {
       return { output: 'Command cancelled before execution', error: true, taskId: currentTaskId };
     }
 
+    const timeoutSec = Math.round(this.commandTimeoutMs / 1000);
+    logger.log('Command', `[${currentTaskId}] Starting: "${command}" in ${workDir} (timeout: ${timeoutSec}s)`);
+
     return new Promise((resolve) => {
       let resolved = false;
-      const child = exec(command, { cwd: workDir, timeout: 180000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const child = exec(command, { cwd: workDir, timeout: this.commandTimeoutMs, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
         if (resolved) return;
         resolved = true;
         this.runningTasks.delete(currentTaskId);
+        const cmdDur = ((Date.now() - cmdStartTime) / 1000).toFixed(2);
         const out = stdout ? stdout.trim() : '';
         const err = stderr ? stderr.trim() : '';
         const exitCode = error?.code ?? (error ? 1 : 0);
+
+        logger.log('Command', `[${currentTaskId}] Finished in ${cmdDur}s with exitCode ${exitCode}${err ? ` (stderr: ${err.slice(0, 100)})` : ''}`);
 
         let result = `Command: ${command}\nExit Code: ${exitCode}\n`;
         if (out) result += `\nSTDOUT:\n${out}\n`;
@@ -551,7 +760,7 @@ export class ToolExecutor {
       this.runningTasks.set(currentTaskId, {
         child,
         command,
-        startedAt: Date.now()
+        startedAt: cmdStartTime
       });
 
       if (signal) {

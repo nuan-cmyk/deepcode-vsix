@@ -1,25 +1,25 @@
-# Guideline: Final Completion Summary Report (RAG)
+# Guideline: Final Completion Summary Report
 
-When all plan items are verified, tests pass, and diagnostics are 0 errors, DeepSeek Agent outputs a professional, concise summary in Russian.
+When all plan items are verified, tests pass, and diagnostics report 0 errors, DeepCode agent outputs a professional, concise summary in English.
 
 ## Standard Report Template
 
 ```markdown
-### Что было сделано и исправлено:
+### Summary of Changes and Verification:
 
-1. **[Название этапа / функциональности]**:
-   - Описание конкретного изменения в файле `path/to/file.ext`.
-   - Что было добавлено или исправлено.
+1. **[Feature / Module Name]**:
+   - Description of changes in `path/to/file.ext`.
+   - What was added, refactored, or fixed.
 
-2. **[Выполнение терминальных команд и тестов]**:
-   - Запущены команды: `python todo.py add "..."`, `pytest tests/`.
-   - Результат: Все тесты пройдены успешно (код 0).
+2. **[Terminal Commands and Testing]**:
+   - Commands executed: `python todo.py add "..."`, `pytest tests/`.
+   - Result: All tests passed successfully (exit code 0).
 
-3. **[Верификация и диагностика]**:
-   - Проверены синтаксис и типы VS Code language server (`get_diagnostics`).
-   - Ошибок нет (0 errors, 0 warnings).
+3. **[Verification and Diagnostics]**:
+   - Checked syntax and types via VS Code language server (`get_diagnostics`).
+   - Clean report (0 errors, 0 warnings).
 
-Код готов к использованию. 🚀
+The code is verified and ready for use.
 ```
 
 Always follow this exact structure when concluding an autonomous development task.
