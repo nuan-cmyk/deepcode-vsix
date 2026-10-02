@@ -1,4 +1,4 @@
-# Guideline: Surgical Code Editing (Точечное редактирование)
+# Guideline: Surgical Code Editing
 
 To prevent inadvertent bugs, regression, or accidental deletion of working code:
 

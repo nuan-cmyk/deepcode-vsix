@@ -1,55 +1,56 @@
-# Guideline: Plan & Architecture Formulation (RAG)
+# Guideline: Plan & Architecture Formulation
 
-Before writing or editing code for any new feature, idea, application, or refactor, DeepSeek Agent MUST first formulate a complete engineering proposal.
+Before writing or editing code for any new feature, idea, application, or refactor, DeepCode agent MUST first formulate a complete engineering proposal.
 
 ## 1. When to Propose a Plan
-- Whenever the user proposes a new project, feature, idea, game, script, or architecture change (e.g. «напиши игру», «создай проект», «добавь фичу»).
-- **STRICT FORBIDDEN**: Never call `create_file` or `edit_file` in your first turn! All code writing starts ONLY after the user confirms the plan!
+- Whenever the user proposes a new project, feature, idea, game, script, or architecture change (e.g., "create a project", "build an app", "add a feature").
+- **STRICT FORBIDDEN**: Never call `create_file` or `edit_file` in your first turn! All code modifications start ONLY after the user confirms the plan!
 
 ## 2. Mandatory Plan Document Sections
-The plan is NOT just a list of bullet points. It must be a comprehensive design document in Russian containing:
+The plan is NOT just a list of bullet points. It must be a comprehensive design document in English containing:
 
-### 1. Архитектурная концепция и стек технологий
-- Детальное описание идеи, правила/механики, выбранные библиотеки и обоснование.
-- Архитектурное разделение слоев (core, config, ui, storage, tests).
+### 1. Architectural Concept and Technology Stack
+- Detailed description of the design, core mechanics/rules, chosen libraries, and architectural justification.
+- Layer separation (core, config, ui, storage, tests).
 
-### 2. Строение файлов проекта (Project Tree)
-- Полное визуальное дерево всех создаваемых каталогов и файлов с пояснениями:
+### 2. Project File Structure (Project Tree)
+- Complete visual tree of all directories and files to be created, with descriptions:
 ```text
 project_name/
-├── requirements.txt      # Внешние зависимости
-├── config.py             # Настройки, константы и параметры
-├── main.py               # Главная точка входа и цикл приложения
+├── requirements.txt      # External dependencies
+├── config.py             # Settings, constants, and parameters
+├── main.py               # Main entrypoint and application loop
 ├── core/
 │   ├── __init__.py
-│   └── engine.py         # Основная бизнес-логика или движок
+│   └── engine.py         # Core business logic or engine
 └── tests/
-    └── test_engine.py    # Автотесты для проверки логики
+    └── test_engine.py    # Unit tests verifying logic
 ```
 
-### 3. Детализация модулей и логики
-- Назначение ключевых классов, функций и потоков данных.
+### 3. Module Details & Logic Flow
+- Purpose of key classes, functions, and data pipelines.
 
-### 4. Интерактивный чек-лист реализации (<plan>)
-- Пошаговый нумерованный список конкретных задач реализации, составленный ИИ для автономного выполнения:
-```xml
+### 4. Interactive Implementation Checklist (<plan>)
+- Step-by-step numbered list of concrete implementation tasks, formulated for autonomous execution. Output the <plan> tag directly without markdown code fences:
 <plan>
-1. [ ] Инициализировать проект и создать requirements.txt
-2. [ ] Создать модуль конфигурации config.py
-3. [ ] Реализовать основной модуль core/engine.py
-4. [ ] Разработать точку входа main.py
-5. [ ] Написать тесты tests/test_engine.py
-6. [ ] Запустить проект и тесты в терминале (проверка запуска)
-7. [ ] Проверить отсутствие ошибок диагностики VS Code (0 ошибок)
+1. [ ] Initialize project and create requirements.txt
+2. [ ] Create configuration module config.py
+3. [ ] Implement core logic in core/engine.py
+4. [ ] Develop main application entrypoint main.py
+5. [ ] Write unit tests in tests/test_engine.py
+6. [ ] Execute project and tests in terminal (validate exit code 0)
+7. [ ] Verify VS Code language server diagnostics report 0 errors
 </plan>
-```
 
-### 5. Завершение первой фазы
-«*План и архитектура спроектированы. Нажмите кнопку **"Подтвердить план и начать выполнение"** ниже или внесите свои пожелания, чтобы начать реализацию.*»
+### 5. Phase 1 Conclusion
+"*The plan and architecture have been proposed. Click **Approve plan and start execution** below or provide feedback to proceed with implementation.*"
 
 ## 3. Execution After Confirmation
 Once the user confirms the plan:
 - Execute each step sequentially.
-- In each turn, mark completed items as done: `1. [x] ~~Инициализировать проект...~~`
-- Highlight the current in-progress step: `⏳ 2. [ ] Создать модуль конфигурации...`
+- In each turn, mark completed items as done: `1. [x] ~~Initialize project...~~`
+- Highlight the current in-progress step: `2. [ ] Create configuration module...`
 - Do not stop until all items are completed, tests pass with exit code 0, and diagnostics report 0 errors.
+
+## 4. Strict Emoji Prohibition (NO EMOJIS)
+- It is STRICTLY FORBIDDEN to use any emojis (no ⏳, 📋, ⚙️, ✅, 🚀, 💡, 🔍, etc.) in thoughts, step lines, plan items, headings, or responses without explicit user request. Use clean, professional technical text only.

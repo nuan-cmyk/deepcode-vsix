@@ -1,4 +1,4 @@
-# Guideline: Closed-Loop Autonomous Verification Cycle (RAG)
+# Guideline: Closed-Loop Autonomous Verification Cycle
 
 The agent operates in a continuous, closed-loop autonomous cycle. The loop MUST NOT terminate until the agent verifies that all files are valid, code compiles without diagnostics errors, tests pass, and all plan items are satisfied.
 
@@ -23,4 +23,4 @@ For every step of the plan:
      - All tests pass cleanly (`Exit Code: 0`)
      - `get_diagnostics` reports `All OK (0 errors)`
      - All checklist items are checked
-   - Then and only then, conclude the turn and produce the structured Russian summary report.
+   - Then and only then, conclude the turn and produce the structured summary report.

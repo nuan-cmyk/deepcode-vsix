@@ -1,10 +1,22 @@
 import * as vscode from 'vscode';
-import { DeepSeekClient } from '../client/deepseekClient';
-import { ToolExecutor } from '../tools';
+import { DeepSeekClient, delayForNewRequest } from '../client/deepseekClient';
+import { ToolExecutor, TOOL_DEFINITIONS } from '../tools';
 import { PromptBuilder } from './promptBuilder';
 import { SessionManager } from './sessionManager';
 import * as path from 'path';
-import { ChatMessage, ToolCall } from './types';
+import { ChatMessage, ToolCall, AgentActivityStep, CommandPermissionRequest, ChatSession } from './types';
+import { 
+  countConversationTokens, 
+  countMessageTokens, 
+  DEFAULT_CONTEXT_LIMIT, 
+  TokenUsageStats,
+  LOCAL_COMPACT_THRESHOLD,
+  GENERAL_COMPACT_THRESHOLD,
+  ULTRA_COMPACT_THRESHOLD,
+  calculateTargetCompactedTokens,
+  calculateRetentionStats
+} from './tokenizer';
+import { logger } from '../logger';
 
 export interface AgentCallbacks {
   onChunk: (text: string) => void;
@@ -18,15 +30,114 @@ export interface AgentCallbacks {
   onPlanProposed?: (planText: string, planItems: string[]) => void;
   onTaskStart?: (taskId: string, command: string) => void;
   onTaskEnd?: (taskId: string, command: string, exitCode: number, output: string) => void;
-  onActivityStep?: (step: {
-    type: 'edit' | 'explore' | 'command' | 'thought' | 'verify';
-    title: string;
-    detail?: string;
-    added?: number;
-    removed?: number;
-    exitCode?: number;
-    path?: string;
-  }) => void;
+  onActivityStep?: (step: AgentActivityStep) => void;
+  onTokenUsage?: (usage: TokenUsageStats) => void;
+  onCommandPermissionRequest?: (req: CommandPermissionRequest) => Promise<'run_once' | 'always_allow' | 'deny'>;
+  onMessagesCompacted?: () => void;
+}
+
+export const COMPACT_THRESHOLD = 80000;
+
+function isConnectionClosedEmptyError(err: any): boolean {
+  if (!err) return false;
+  const msg = (typeof err === 'string' ? err : (err.message || String(err))).toLowerCase();
+  return (
+    msg.includes('empty stream') ||
+    msg.includes('0 токенов') ||
+    msg.includes('0 tokens') ||
+    msg.includes('0 bytes') ||
+    msg.includes('пустой ответ') ||
+    msg.includes('server closed connection') ||
+    msg.includes('connection without response') ||
+    msg.includes('account restriction or expired session') ||
+    msg.includes('account restriction') ||
+    msg.includes('expired session') ||
+    msg.includes('session has expired') ||
+    msg.includes('session_expired') ||
+    msg.includes('сессия устарела') ||
+    msg.includes('сессия deepseek устарела') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('socket hang up') ||
+    msg.includes('502') ||
+    msg.includes('503') ||
+    msg.includes('504') ||
+    msg.includes('bad gateway') ||
+    msg.includes('gateway timeout') ||
+    msg.includes('failed to fetch') ||
+    msg.includes('networkerror') ||
+    msg.includes('stream stalled') ||
+    msg.includes('connection timeout') ||
+    msg.includes('socket hung')
+  );
+}
+
+export function isAssistantWaitingForUser(content: string): boolean {
+  if (!content) return false;
+  const trimmed = content.trim();
+  const prose = trimmed
+    .replace(/<(?:tool_call|function_call|tool)\b[^>]*>[\s\S]*?(?:<\/(?:tool_call|function_call|call|tool)>|$)/gi, '')
+    .replace(/<[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}[\s\S]*?(?:<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}>|$)/gi, '')
+    .trim();
+  if (!prose) return false;
+
+  const questionPatterns = [
+    /ожидаю\s+от\s+вас/i,
+    /жду\s+(?:вашего\s+)?(?:ответа|уточнения|решения|указания)/i,
+    /пожалуйста[,\s]+(?:подскажите|уточните|сообщите|предоставьте|напишите|ответьте|выберите)/i,
+    /нужно\s+(?:уточнение|пояснение|описание)/i,
+    /что\s+за\s+проект/i,
+    /какова\s+цель/i,
+    /какие\s+требования/i,
+    /отсутствует\s+описание/i,
+    /невозможно\s+определить\s+(?:следующее|дальнейшее)/i,
+    /what would you like/i,
+    /please (?:choose|confirm|specify|tell me|provide|clarify)/i,
+    /waiting for your (?:input|response|clarification|instructions)/i,
+    /should i proceed/i,
+    /how would you like/i,
+    /do you want me to/i
+  ];
+
+  const hasQuestionWord = questionPatterns.some(p => p.test(prose));
+  const endsWithQuestion = /\?\s*$/m.test(prose.slice(-150)) && /(?:подскажите|уточните|как|что|где|какой|какая|почему|which|what|how|where)\b/i.test(prose.slice(-300));
+
+  return Boolean(hasQuestionWord || endsWithQuestion);
+}
+
+export function isReadOnlyCommand(command: string | undefined): boolean {
+  if (!command || !command.trim()) return false;
+  const raw = command.trim();
+  const segments = raw.split(/&&|\|\||[;&]/).map(s => s.trim()).filter(Boolean);
+  if (segments.length === 0) return false;
+
+  const readOnlyPrefixes = [
+    'dir', 'ls', 'vdir', 'tree',
+    'echo', 'echo.', 'echo\\', 'echo/',
+    'cd', 'chdir', 'pwd',
+    'type', 'cat', 'head', 'tail', 'more', 'less',
+    'find', 'findstr', 'grep', 'rg', 'ag',
+    'tasklist', 'ps', 'top', 'htop', 'get-process', 'gps', 'netstat', 'ipconfig', 'ifconfig', 'wmic',
+    'git status', 'git log', 'git diff', 'git show', 'git branch', 'git tag', 'git remote', 'git rev-parse',
+    'where', 'which', 'whoami', 'hostname', 'ver', 'set', 'env', 'printenv',
+    'test', 'true', 'false',
+    'get-childitem', 'gci', 'get-item', 'get-content', 'gc', 'select-string', 'sls', 'get-command', 'gcm', 'get-location', 'gl'
+  ];
+
+  for (let seg of segments) {
+    seg = seg.replace(/2>nul|2>&1|1>nul|>nul/gi, '').trim();
+    seg = seg.replace(/^(?:cmd(?:\.exe)?\s+\/c|powershell(?:\.exe)?\s+(?:-command|-c)?)\s+/i, '').trim();
+    if (/^[a-zA-Z]:$/i.test(seg)) continue;
+
+    const segLower = seg.toLowerCase();
+    const pipeParts = segLower.split('|').map(p => p.trim()).filter(Boolean);
+    const isPipeSafe = pipeParts.every(p => {
+      return readOnlyPrefixes.some(pref => p.startsWith(pref + ' ') || p === pref || p.startsWith(pref + '/') || p.startsWith(pref + '\\'));
+    });
+
+    if (!isPipeSafe) return false;
+  }
+  return true;
 }
 
 export class AgentEngine {
@@ -77,7 +188,7 @@ export class AgentEngine {
     // Immediately notify UI that execution has stopped
     if (this.activeCallbacks) {
       try {
-        this.activeCallbacks.onStatus('Остановлено пользователем');
+        this.activeCallbacks.onStatus('Stopped by user');
         this.activeCallbacks.onComplete('cancelled');
       } catch {}
       this.activeCallbacks = null;
@@ -92,6 +203,36 @@ export class AgentEngine {
     }
 
     const session = this.sessionManager.getCurrentSession();
+
+    // Check if the user manually triggered context compaction
+    const trimmed = userText.trim().toLowerCase();
+    if (trimmed === '/compact' || trimmed === '/сжать' || trimmed === 'compact' || trimmed === 'сжать контекст') {
+      await this.runCompact(callbacks);
+      return;
+    }
+
+    // Check if the user is confirming a proposed plan
+    const isPlanConfirmation = /^(?:confirm\s+plan|approve\s+plan|start\s+execution|proceed|continue|plan\s+approved|confirm|подтверждаю|утверждаю|начинай|выполняй|поехали)/i.test(userText.trim()) ||
+                               /^(?:yes|да|ок|ok|go)$/i.test(userText.trim());
+
+    // Check if the user explicitly demands a plan
+    const isExplicitPlanRequest = /^(?:make\s+a?\s*plan|create\s+a?\s*plan|\/plan|сделай\s+план|составь\s+план|спланируй|напиши\s+план|новый\s+план|план\b)/i.test(userText.trim());
+
+    if (isPlanConfirmation) {
+      session.planConfirmed = true;
+      session.planExplicitlyDemanded = false;
+      this.sessionManager.setPlanConfirmed(true);
+      this.sessionManager.setPlanExplicitlyDemanded(false);
+    } else if (isExplicitPlanRequest) {
+      session.planConfirmed = false;
+      session.planExplicitlyDemanded = true;
+      this.sessionManager.setPlanConfirmed(false);
+      this.sessionManager.setPlanExplicitlyDemanded(true);
+    } else {
+      session.planExplicitlyDemanded = false;
+      this.sessionManager.setPlanExplicitlyDemanded(false);
+    }
+
     const userMsg: ChatMessage = {
       id: 'msg_' + Date.now(),
       role: 'user',
@@ -126,224 +267,380 @@ export class AgentEngine {
     this.activeCallbacks = callbacks;
 
     const config = vscode.workspace.getConfiguration('deepseek');
-    const maxRetries = config.get<number>('maxSelfHealingRetries', 3);
+    const defaultSettings = this.sessionManager.getDefaultSettings();
+    const maxRetries = defaultSettings.maxRetries ?? config.get<number>('maxSelfHealingRetries', 3);
+    const maxAutoRetries = defaultSettings.maxRetries ?? 3;
     let selfHealingAttempts = 0;
     let iteration = 0;
+    let consecutiveNudgeCount = 0;
+    let phase1NudgeCount = 0;
+    let repromptAttempts = 0;
+    let validationRetryCount = 0;
+    let emptyResponseCount = 0;
     let touchedCodeFile = false;
     let lastTouchedFile = '';
-    const maxIterations = 10;
-
+    let lastReadFilePath = '';
+    let consecutiveFileReadCount = 0;
     try {
-      while (this.isRunning && iteration < maxIterations) {
+      while (this.isRunning) {
         iteration++;
         callbacks.onTurnStart?.(iteration);
+
+        const reqDelay = defaultSettings.requestDelayMs ?? 0;
+        if (reqDelay > 0 && iteration > 1) {
+          logger.log('Agent', `Waiting ${reqDelay}ms request delay before turn ${iteration}...`);
+          callbacks.onStatus?.(`Request delay (${reqDelay}ms)...`);
+          await delayForNewRequest(reqDelay, this.abortController?.signal);
+        }
+
         const session = this.sessionManager.getCurrentSession();
         const activeProject = this.sessionManager.getActiveProject();
         if (activeProject && activeProject.path) {
           this.toolExecutor.setWorkspaceRoot(activeProject.path);
         }
-        const systemPrompt = await this.promptBuilder.buildSystemPrompt(activeProject);
 
-        const messagesToSend = this.pruneMessagesForRequest(systemPrompt, session.messages, 45);
+        const isUnstuckTurn = Boolean(session.agentMode && session.planConfirmed && consecutiveNudgeCount >= 2);
+        if (isUnstuckTurn) {
+          callbacks.onActivityStep?.({
+            type: 'unstuck',
+            code: 'resolving',
+            title: 'Resolving next step...'
+          });
+        }
 
-        callbacks.onStatus(session.thinking ? 'Размышляет...' : 'Генерация ответа...');
+        // Check for automatic compaction threshold
+        const visibleMessages = (session.messages || []).filter(m => !m.isInternal && !m.id?.startsWith('compact_') && !m.content?.startsWith('[COMPACTED CONTEXT BRIEFING]'));
+        let uncompactedMessages = visibleMessages;
+        if (session.compactedSummary && session.compactedAtMessageId) {
+          const cutIdx = visibleMessages.findIndex(m => m.id === session.compactedAtMessageId);
+          if (cutIdx !== -1) {
+            uncompactedMessages = visibleMessages.slice(cutIdx + 1);
+          }
+        }
+
+        let uncompactedRawTokens = 0;
+        for (const m of uncompactedMessages) {
+          uncompactedRawTokens += countMessageTokens(m);
+        }
+
+        let compactedTokens = 0;
+        if (session.compactedSummary) {
+          compactedTokens = countMessageTokens({ id: 'summary', role: 'user', content: session.compactedSummary, timestamp: 0 });
+        }
+
+        // TIER 2 / TIER 3: General & Ultra Compaction
+        // Triggers when accumulated milestone blocks reach GENERAL_COMPACT_THRESHOLD (256k) or ULTRA_COMPACT_THRESHOLD (900k)
+        if (compactedTokens >= GENERAL_COMPACT_THRESHOLD && session.compactedBlocks && session.compactedBlocks.length > 2) {
+          const isUltra = compactedTokens >= ULTRA_COMPACT_THRESHOLD;
+          const statusText = isUltra ? 'Ultra Compacting (900k Ground Truth)...' : 'General Compacting (256k Meta-Archive)...';
+          callbacks.onStatus(statusText);
+          callbacks.onActivityStep?.({
+            type: 'compact',
+            title: isUltra ? 'Ultra Compacting' : 'General Compacting'
+          });
+
+          const consolidated = await this.generateGeneralCompactSummary(session.compactedBlocks, session, isUltra);
+          if (consolidated) {
+            const epochNum = (session.epochSummaries?.length || 0) + 1;
+            this.sessionManager.applyGeneralCompaction(consolidated, epochNum);
+            compactedTokens = countMessageTokens({ id: 'summary', role: 'user', content: this.sessionManager.getCurrentSession().compactedSummary || '', timestamp: 0 });
+          }
+          callbacks.onActivityStep?.({
+            type: 'compact_done',
+            title: isUltra ? 'Ultra Compacted' : 'General Compacted'
+          });
+        }
+
+        // TIER 1: Local Milestone Compaction (every 80k uncompacted raw tokens)
+        if (uncompactedRawTokens >= LOCAL_COMPACT_THRESHOLD && uncompactedMessages.length >= 2) {
+          callbacks.onStatus('Compacting (80k)...');
+          callbacks.onActivityStep?.({
+            type: 'compact',
+            title: 'Compacting (80k)'
+          });
+
+          const lastMsg = uncompactedMessages[uncompactedMessages.length - 1];
+          const hasPendingUserMsg = lastMsg && lastMsg.role === 'user';
+          const priorMessages = hasPendingUserMsg && uncompactedMessages.length > 2 ? uncompactedMessages.slice(0, -1) : uncompactedMessages;
+
+          this.sessionManager.recordRawTokensProcessed(uncompactedRawTokens);
+
+          const summary = await this.generateCompactSummary(priorMessages, session);
+          if (summary) {
+            const lastPriorId = priorMessages[priorMessages.length - 1]?.id;
+            this.sessionManager.setCompactedContext(summary, lastPriorId);
+          }
+          callbacks.onActivityStep?.({
+            type: 'compact_done',
+            title: 'Compacted'
+          });
+        }
+
+        const userMsgs = (session.messages || []).filter(m => m.role === 'user' && !m.isInternal);
+        const lastUserText = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1].content : '';
+        const isContinuePrompt = /^(?:continue|proceed|продолжай|дальше|далее|go on|next)$/i.test(lastUserText.trim());
+
+        const effectiveSandbox = session.agentMode === false ? 'bypass' : (session.sandboxMode || 'local');
+        const systemPrompt = await this.promptBuilder.buildSystemPrompt(activeProject, {
+          agentMode: session.agentMode !== false,
+          planMode: session.planMode !== false,
+          planConfirmed: Boolean(session.planConfirmed),
+          deadMode: Boolean(session.deadMode),
+          sandboxMode: effectiveSandbox
+        });
+
+        const messagesToSend = this.pruneMessagesForRequest(systemPrompt, session.messages, 120, session);
+
+        // Pre-flight token calculation using tokenizer
+        const toolsForRun = session.agentMode ? TOOL_DEFINITIONS : undefined;
+        let turnUsage = countConversationTokens(messagesToSend, toolsForRun, DEFAULT_CONTEXT_LIMIT);
+        turnUsage.lastCompactTimestamp = session.lastCompactTimestamp;
+        this.sessionManager.updateTokens(turnUsage.totalTokens, turnUsage.promptTokens, turnUsage.completionTokens, turnUsage.userTokens);
+        callbacks.onTokenUsage?.(turnUsage);
+
+        callbacks.onStatus(session.thinking ? 'Reasoning...' : 'Generating response...');
 
         let currentAssistantContent = '';
         let currentReasoningContent = '';
         let pendingToolCalls: ToolCall[] = [];
+        let receivedApiUsage = false;
 
-        await new Promise<void>((resolve, reject) => {
+        let connectionRecoveryAttempts = 0;
+        const maxConnectionRetries = maxAutoRetries;
+
+        while (true) {
           if (!this.isRunning || this.abortController?.signal?.aborted) {
-            reject(new Error('Operation cancelled by user'));
-            return;
+            break;
           }
 
-          this.client.streamChatCompletion(
-            messagesToSend,
-            {
-              model: session.model,
-              thinking: session.thinking,
-              search: session.search,
-              deadMode: session.deadMode,
-              agentMode: session.agentMode,
-              conversationId: session.conversationId
-            },
-            {
-              onChunk: (delta) => {
-                if (!this.isRunning || this.abortController?.signal?.aborted) return;
-                currentAssistantContent += delta;
-                callbacks.onChunk(delta);
-              },
-              onReasoningChunk: (delta) => {
-                if (!this.isRunning || this.abortController?.signal?.aborted) return;
-                currentReasoningContent += delta;
-                callbacks.onReasoningChunk(delta);
-              },
-              onConversationId: (convId) => {
-                this.sessionManager.updateConversationId(convId);
-              },
-              onError: (err) => {
-                reject(err);
-              },
-              onComplete: (finishReason) => {
-                if (finishReason === 'cancelled' || this.abortController?.signal?.aborted || !this.isRunning) {
-                  reject(new Error('Operation cancelled by user'));
-                } else {
-                  resolve();
-                }
+          currentAssistantContent = '';
+          currentReasoningContent = '';
+          pendingToolCalls = [];
+          receivedApiUsage = false;
+          let streamError: any = null;
+
+          // When recovering from a 0-tokens dropped connection, append continue directive if appropriate
+          let effectiveMessages = [...messagesToSend];
+          if (connectionRecoveryAttempts > 0) {
+            const lastMsg = effectiveMessages[effectiveMessages.length - 1];
+            if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'assistant')) {
+              effectiveMessages.push({
+                id: 'continue_unstuck_' + Date.now(),
+                role: 'user',
+                content: 'Continue your work and proceed to the next step.',
+                timestamp: Date.now()
+              });
+            }
+          }
+
+          try {
+            await new Promise<void>((resolve, reject) => {
+              if (!this.isRunning || this.abortController?.signal?.aborted) {
+                reject(new Error('Operation cancelled by user'));
+                return;
               }
-            },
-            this.abortController?.signal
-          );
-        });
+
+              this.client.streamChatCompletion(
+                effectiveMessages,
+                {
+                  model: session.model,
+                  thinking: Boolean(session.thinking) && consecutiveNudgeCount < 2,
+                  search: session.search,
+                  deadMode: session.deadMode,
+                  agentMode: session.agentMode,
+                  sandboxMode: effectiveSandbox,
+                  conversationId: session.conversationId
+                },
+                {
+                  onChunk: (delta) => {
+                    if (!this.isRunning || this.abortController?.signal?.aborted) return;
+                    connectionRecoveryAttempts = 0; // Model started outputting text: reset recovery counter
+                    if (!currentAssistantContent) {
+                      callbacks.onStatus(session.agentMode ? 'Formulating actions...' : 'Generating response...');
+                    }
+                    currentAssistantContent += delta;
+                    callbacks.onChunk(delta);
+                  },
+                  onReasoningChunk: (delta) => {
+                    if (!this.isRunning || this.abortController?.signal?.aborted) return;
+                    connectionRecoveryAttempts = 0; // Model started reasoning: reset recovery counter
+                    currentReasoningContent += delta;
+                    callbacks.onReasoningChunk(delta);
+                  },
+                  onToolCall: (tc) => {
+                    // Collect native tool_calls from the JSON SSE stream
+                    if (!this.isRunning || this.abortController?.signal?.aborted) return;
+                    connectionRecoveryAttempts = 0; // Model invoked tools: reset recovery counter
+                    pendingToolCalls.push(tc);
+                  },
+                  onStatus: (st) => {
+                    callbacks.onStatus(st);
+                  },
+                  onConversationId: (convId) => {
+                    if (convId && (convId.includes(':') || !session.conversationId)) {
+                      this.sessionManager.updateConversationId(convId);
+                    }
+                  },
+                  onUsage: (u) => {
+                    receivedApiUsage = true;
+                    const maxTokens = DEFAULT_CONTEXT_LIMIT;
+                    const percent = Math.min(100, Math.round((u.total_tokens / maxTokens) * 100));
+
+                    let userTokens = 0;
+                    for (const m of messagesToSend) {
+                      if (m.role === 'user') {
+                        userTokens += countMessageTokens(m);
+                      }
+                    }
+                    const systemPromptTokens = Math.max(0, u.prompt_tokens - userTokens);
+
+                    turnUsage = {
+                      promptTokens: systemPromptTokens > 0 ? systemPromptTokens : u.prompt_tokens,
+                      completionTokens: u.completion_tokens,
+                      totalTokens: u.total_tokens,
+                      maxTokens,
+                      percent,
+                      userTokens,
+                      systemTokens: systemPromptTokens,
+                      contextTokens: u.total_tokens,
+                      lastCompactTimestamp: session.lastCompactTimestamp
+                    };
+                    this.sessionManager.updateTokens(u.total_tokens, turnUsage.promptTokens, u.completion_tokens, userTokens);
+                    callbacks.onTokenUsage?.(turnUsage);
+                  },
+                  onError: (err) => {
+                    reject(err);
+                  },
+                  onComplete: (finishReason) => {
+                    if (finishReason === 'cancelled' || this.abortController?.signal?.aborted || !this.isRunning) {
+                      reject(new Error('Operation cancelled by user'));
+                    } else {
+                      resolve();
+                    }
+                  }
+                },
+                this.abortController?.signal,
+                session.agentMode ? TOOL_DEFINITIONS : undefined
+              );
+            });
+          } catch (err: any) {
+            streamError = err;
+          }
+
+          if (streamError) {
+            if (this.abortController?.signal?.aborted || streamError.name === 'AbortError' || streamError.message === 'Operation cancelled by user') {
+              throw streamError;
+            }
+
+            if (isConnectionClosedEmptyError(streamError)) {
+              if (session.conversationId) {
+                logger.log('Agent', `Server closed connection (0 tokens). Resetting conversationId (${session.conversationId}) to recover stateless.`);
+                session.conversationId = undefined;
+                this.sessionManager.updateConversationId('');
+              }
+
+              if (connectionRecoveryAttempts < maxConnectionRetries) {
+                connectionRecoveryAttempts++;
+                callbacks.onActivityStep?.({
+                  type: 'unstuck',
+                  code: 'empty_response',
+                  title: `Server returned empty response. Auto-retry step (${connectionRecoveryAttempts}/${maxConnectionRetries})...`,
+                  attempt: connectionRecoveryAttempts,
+                  maxAttempts: maxConnectionRetries,
+                  startTime: Date.now()
+                });
+                callbacks.onStatus(`Unstuck (${connectionRecoveryAttempts}/${maxConnectionRetries})...`);
+
+                const delay = Math.min(6000, 1500 + connectionRecoveryAttempts * 1000);
+                await new Promise<void>(r => {
+                  const tm = setTimeout(r, delay);
+                  this.abortController?.signal?.addEventListener('abort', () => {
+                    clearTimeout(tm);
+                    r();
+                  }, { once: true });
+                });
+
+                if (!this.isRunning || this.abortController?.signal?.aborted) {
+                  break;
+                }
+                continue;
+              } else {
+                // Exhausted retries: proxy/account restriction or expired session
+                callbacks.onActivityStep?.({
+                  type: 'unstuck',
+                  title: `Server closed connection without response (0 tokens) after ${maxConnectionRetries} attempts.`
+                });
+                const alertMsg = `Сервер API или прокси закрыл соединение без ответа (0 токенов) после ${maxConnectionRetries} попыток continue.\n\nВозможные причины: истекла сессия на сайте прокси или действует ограничение аккаунта.\nПожалуйста, обновите сессию/токен в настройках расширения или нажмите Continue для повторной попытки.`;
+                callbacks.onStatus('Connection closed by server (0 tokens)');
+                throw new Error(alertMsg);
+              }
+            }
+
+            throw streamError;
+          }
+
+          break;
+        }
+
+        // If server stream didn't provide exact usage, compute completion addition locally
+        if (!receivedApiUsage && (currentAssistantContent || currentReasoningContent)) {
+          const compTokens = countConversationTokens([
+            ...messagesToSend,
+            { id: `temp_${Date.now()}`, role: 'assistant', content: currentAssistantContent, reasoningContent: currentReasoningContent, timestamp: Date.now() }
+          ], toolsForRun, DEFAULT_CONTEXT_LIMIT);
+          compTokens.lastCompactTimestamp = session.lastCompactTimestamp;
+          this.sessionManager.updateTokens(compTokens.totalTokens, compTokens.promptTokens, compTokens.completionTokens, compTokens.userTokens);
+          callbacks.onTokenUsage?.(compTokens);
+        }
 
         if (!this.isRunning || this.abortController?.signal?.aborted) {
           break;
         }
 
+        // If inline <think> tags were present in currentAssistantContent, extract to currentReasoningContent
+        const inlineThinkMatch = currentAssistantContent.match(/<think>([\s\S]*?)<\/think>/i);
+        if (inlineThinkMatch) {
+          if (!currentReasoningContent) {
+            currentReasoningContent = inlineThinkMatch[1].trim();
+          }
+          currentAssistantContent = currentAssistantContent.replace(/<think>[\s\S]*?<\/think>\s*/gi, '').trim();
+        }
+
+        // Only if the model mistakenly placed an actual <plan> tag strictly into reasoningContent and currentAssistantContent is empty:
+        if (!currentAssistantContent.trim() && currentReasoningContent.includes('<plan>')) {
+          const pMatch = currentReasoningContent.match(/<plan>([\s\S]*?)(?:<\/plan>|$)/i);
+          if (pMatch) {
+            currentAssistantContent = pMatch[0];
+            if (!currentAssistantContent.endsWith('</plan>')) {
+              currentAssistantContent += '\n</plan>';
+            }
+            callbacks.onChunk(currentAssistantContent);
+          }
+        }
+
         // Parse XML / DSML tool calls if in Agent mode
-        if (session.agentMode && currentAssistantContent.includes('<tool_call')) {
-          const xmlToolRegex = /<tool_call\s+name=["']([^"']+)["']>([\s\S]*?)<\/tool_call>/gi;
-          let m: RegExpExecArray | null;
-          while ((m = xmlToolRegex.exec(currentAssistantContent)) !== null) {
-            const toolName = m[1].trim();
-            const inner = m[2];
-            const callId = `call_${Date.now()}_${pendingToolCalls.length}`;
-
-            if (toolName === 'create_file') {
-              const pm = inner.match(/<path>([\s\S]*?)<\/path>/i);
-              const cm = inner.match(/<content>([\s\S]*?)<\/content>/i);
-              const om = inner.match(/<overwrite>(true|false)<\/overwrite>/i);
-              if (pm && cm) {
-                pendingToolCalls.push({
-                  id: callId,
-                  type: 'function',
-                  function: {
-                    name: 'write_file',
-                    arguments: JSON.stringify({
-                      path: pm[1].trim(),
-                      content: cm[1],
-                      overwrite: om ? om[1].toLowerCase() === 'true' : false
-                    })
-                  }
-                });
+        if (session.agentMode) {
+          const parsedCalls = this.parseToolCallsFromContent(currentAssistantContent, pendingToolCalls.length, session);
+          for (const call of parsedCalls) {
+            if (!pendingToolCalls.some(p => p.function.name === call.function.name && p.function.arguments === call.function.arguments)) {
+              pendingToolCalls.push(call);
+            }
+          }
+          if (pendingToolCalls.length === 0 && currentReasoningContent) {
+            const reasoningCalls = this.parseToolCallsFromContent(currentReasoningContent, 0, session);
+            for (const call of reasoningCalls) {
+              if (!pendingToolCalls.some(p => p.function.name === call.function.name && p.function.arguments === call.function.arguments)) {
+                pendingToolCalls.push(call);
               }
-            } else if (toolName === 'edit_file' || toolName === 'replace_file_content') {
-              const pm = inner.match(/<path>([\s\S]*?)<\/path>/i);
-              const sm = inner.match(/<(?:search|target|targetContent)>([\s\S]*?)<\/(?:search|target|targetContent)>/i);
-              const rm = inner.match(/<(?:replace|replacement|replacementContent)>([\s\S]*?)<\/(?:replace|replacement|replacementContent)>/i);
-              if (pm && sm && rm) {
-                pendingToolCalls.push({
-                  id: callId,
-                  type: 'function',
-                  function: {
-                    name: 'replace_file_content',
-                    arguments: JSON.stringify({
-                      path: pm[1].trim(),
-                      targetContent: sm[1],
-                      replacementContent: rm[1]
-                    })
-                  }
-                });
-              }
-            } else if (toolName === 'read_file' || toolName === 'view_file_slice') {
-              const pm = inner.match(/<path>([\s\S]*?)<\/path>/i);
-              let rawPath = pm ? pm[1].trim() : '';
-              let startLine = 1;
-              let endLine = 200;
-
-              // Parse #L1-65 or :1-65 in path
-              const hashMatch = rawPath.match(/[#:](?:L)?(\d+)(?:-(?:L)?(\d+))?$/i);
-              if (hashMatch) {
-                startLine = parseInt(hashMatch[1], 10);
-                endLine = hashMatch[2] ? parseInt(hashMatch[2], 10) : startLine + 100;
-                rawPath = rawPath.replace(/[#:](?:L)?(\d+)(?:-(?:L)?(\d+))?$/i, '').trim();
-              }
-
-              // Check <start_line> or <startLine> or <start>
-              const startMatch = inner.match(/<(?:start_line|startLine|start)>(\d+)<\/(?:start_line|startLine|start)>/i);
-              if (startMatch) {
-                startLine = parseInt(startMatch[1], 10);
-              }
-
-              // Check <end_line> or <endLine> or <end>
-              const endMatch = inner.match(/<(?:end_line|endLine|end)>(\d+)<\/(?:end_line|endLine|end)>/i);
-              if (endMatch) {
-                endLine = parseInt(endMatch[1], 10);
-              }
-
-              // Check <lines>1-65</lines> or <range>1-65</range>
-              const linesMatch = inner.match(/<(?:lines|range)>(\d+)\s*[-:]\s*(\d+)<\/(?:lines|range)>/i);
-              if (linesMatch) {
-                startLine = parseInt(linesMatch[1], 10);
-                endLine = parseInt(linesMatch[2], 10);
-              }
-
-              if (rawPath) {
-                pendingToolCalls.push({
-                  id: callId,
-                  type: 'function',
-                  function: {
-                    name: 'view_file_slice',
-                    arguments: JSON.stringify({
-                      path: rawPath,
-                      startLine,
-                      endLine
-                    })
-                  }
-                });
-              }
-            } else if (toolName === 'run_command' || toolName === 'run_terminal_command') {
-              const cm = inner.match(/<command>([\s\S]*?)<\/command>/i);
-              if (cm) {
-                pendingToolCalls.push({
-                  id: callId,
-                  type: 'function',
-                  function: {
-                    name: 'run_terminal_command',
-                    arguments: JSON.stringify({
-                      command: cm[1].trim()
-                    })
-                  }
-                });
-              }
-            } else if (toolName === 'list_files' || toolName === 'list_workspace_files') {
-              const pm = inner.match(/<path>([\s\S]*?)<\/path>/i);
-              pendingToolCalls.push({
-                id: callId,
-                type: 'function',
-                function: {
-                  name: 'list_workspace_files',
-                  arguments: JSON.stringify({
-                    folder: pm ? pm[1].trim() : '.'
-                  })
-                }
-              });
             }
           }
         }
 
-        // Check if user is asking to explore/inspect files or workspace
-        const userMsgs = session.messages.filter(m => m.role === 'user');
-        const lastUserText = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1].content : '';
 
-        // Fallback 1: Inspection / Exploration intent
-        const isExploreIntent = /(?:что\s+в|что\s+есть|структур|файлы|папк|содержимое|проект|list|files|workspace)/i.test(lastUserText) ||
-                                /(?:проверю содержимое|исследую структуру|посмотрю файлы|проверю файлы)/i.test(currentAssistantContent);
-        if (pendingToolCalls.length === 0 && session.agentMode && isExploreIntent && iteration === 1) {
-          pendingToolCalls.push({
-            id: `call_${Date.now()}_auto_list`,
-            type: 'function',
-            function: {
-              name: 'list_workspace_files',
-              arguments: JSON.stringify({ folder: '.' })
-            }
-          });
-        }
 
         // Fallback 2: If user asked to execute a command and model returned code block or python line instead of XML tool_call
-        if (pendingToolCalls.length === 0 && session.agentMode) {
-          const isCommandIntent = /(?:выполни|запусти|run|execute|start|тест|test)/i.test(lastUserText);
+        if (pendingToolCalls.length === 0 && session.agentMode && effectiveSandbox !== 'helper' && effectiveSandbox !== 'ask' && (session.planMode === false || session.planConfirmed)) {
+          const isCommandIntent = /(?:run|execute|start|test|build|cmd)/i.test(lastUserText) || /(?:run|execute|start|test|build|cmd|python|cmake|node)\b/i.test(currentAssistantContent);
 
           if (isCommandIntent) {
             let extractedCommand = '';
@@ -359,7 +656,7 @@ export class AgentEngine {
               if (directLine) extractedCommand = directLine.trim();
             }
 
-            if (extractedCommand) {
+            if (extractedCommand && !/^(?:command_here|python script\.py arg1 arg2)$/i.test(extractedCommand.trim())) {
               pendingToolCalls.push({
                 id: `call_${Date.now()}_auto`,
                 type: 'function',
@@ -372,20 +669,112 @@ export class AgentEngine {
           }
         }
 
-        // Plan Detection: if assistant proposes a plan on the first step
-        const planMatch = currentAssistantContent.match(/<plan>([\s\S]*?)<\/plan>/i) ||
-                          currentAssistantContent.match(/(?:###\s*(?:📋\s*)?План[\s\S]*?)((?:\d+[\.\)]\s*\[[ xX]\][^\n]+\n?)+)/i);
-        if (planMatch) {
-          const planText = planMatch[1].trim();
-          const items = planText.split('\n')
-            .map(l => l.trim())
-            .filter(l => /^\d+[\.\)]/i.test(l))
-            .map(l => l.replace(/^\d+[\.\)]\s*(\[[ xX]\]\s*)?/, ''));
-          callbacks.onPlanProposed?.(planText, items);
+        // Fallback 3: If in Agent Mode and model returned file creation in markdown fences/headers instead of XML tags
+        if (pendingToolCalls.length === 0 && session.agentMode && effectiveSandbox !== 'ask' && (session.planMode === false || session.planConfirmed)) {
+          const fileBlockMatches = [...currentAssistantContent.matchAll(/(?:###?\s*[`*]*([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)[`*]*|```[a-zA-Z0-9_-]*\s*[:\s]\s*([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+))\s*\n([\s\S]*?)```/g)];
+          for (const fbm of fileBlockMatches) {
+            const filePath = (fbm[1] || fbm[2] || '').trim();
+            const code = fbm[3] || '';
+            const isDummy = /^(?:путь[\/]|relative[\/]path|path[\/]to|filename\.ext|new_file\.ext|файлу\.ext|file\.ext)/i.test(filePath.replace(/\\/g, '/')) ||
+                            /^(?:полный код нового файла|complete file content here)$/i.test(code.trim());
+            if (filePath && code.trim() && !isDummy && !filePath.includes(' ') && !filePath.startsWith('http')) {
+              pendingToolCalls.push({
+                id: `call_${Date.now()}_auto_file_${pendingToolCalls.length}`,
+                type: 'function',
+                function: {
+                  name: 'write_file',
+                  arguments: JSON.stringify({ path: filePath, content: code, overwrite: true })
+                }
+              });
+            }
+          }
+        }
 
-          // Plan Gate: If this is Turn 1 (new plan proposal) and user has not confirmed yet, PAUSE execution
-          const isUserConfirmed = /план утвержден|confirmPlan|выполняй шаги|начинай выполнять|подтверждаю/i.test(lastUserText);
-          if (!isUserConfirmed && iteration === 1) {
+        // Fallback 4: Extract explicit file read and execution actions when model outputs conversational plan or thinking instead of XML/DSML
+        if (pendingToolCalls.length === 0 && session.agentMode) {
+          const textSources = [currentAssistantContent, currentReasoningContent].filter(Boolean);
+          for (const text of textSources) {
+            // 4a. Match file read intents: "Read http_client.cpp tail (lines 60-101)", "Check server.py line 200-210", "Проверю calculator/mini_calc.py"
+            // Both English and Russian verbs
+            const readRegex = /(?:read|view|check|inspect|examine|провер(?:ю|им|ить|ь)?|посмотр(?:ю|им|еть|и)?|изуч(?:у|им|ить)?|прочита(?:ю|ем|ть)?)[^.!?\n]{0,80}?[`'"]?([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]{1,8})[`'"]?(?:[^\n\d]*?(?:lines?|range|\(?lines?)\s*(\d+)\s*[-:]\s*(\d+)\)?)?/gi;
+            let rm: RegExpExecArray | null;
+            while ((rm = readRegex.exec(text)) !== null) {
+              const filePath = rm[1].trim();
+              if (filePath && !filePath.includes(' ') && !filePath.startsWith('http') && !/^(?:file|path)\.ext$/i.test(filePath)) {
+                const sLine = rm[2] ? parseInt(rm[2], 10) : 1;
+                const eLine = rm[3] ? parseInt(rm[3], 10) : (rm[2] ? sLine + 50 : 150);
+                if (!pendingToolCalls.some(p => p.function.name === 'view_file_slice' && p.function.arguments.includes(filePath))) {
+                  pendingToolCalls.push({
+                    id: `call_${Date.now()}_auto_read_${pendingToolCalls.length}`,
+                    type: 'function',
+                    function: {
+                      name: 'view_file_slice',
+                      arguments: JSON.stringify({ path: filePath, startLine: sLine, endLine: eLine })
+                    }
+                  });
+                }
+              }
+            }
+
+            // 4b. Match explicit terminal commands: only if plan is confirmed or planMode is false AND not helper or ask mode
+            if ((session.planMode === false || session.planConfirmed) && effectiveSandbox !== 'helper' && effectiveSandbox !== 'ask') {
+              const cmdRegex = /(?:run|execute|start|launch)\s+[`'"]([^`'"\n]{4,120})[`'"]/gi;
+              let cm: RegExpExecArray | null;
+              while ((cm = cmdRegex.exec(text)) !== null) {
+                const candidateCmd = cm[1].trim();
+                if (candidateCmd && !/^(?:command_here|command to run)$/i.test(candidateCmd)) {
+                  if (!pendingToolCalls.some(p => p.function.name === 'run_terminal_command' && p.function.arguments.includes(candidateCmd))) {
+                    pendingToolCalls.push({
+                      id: `call_${Date.now()}_auto_cmd_${pendingToolCalls.length}`,
+                      type: 'function',
+                      function: {
+                        name: 'run_terminal_command',
+                        arguments: JSON.stringify({ command: candidateCmd })
+                      }
+                    });
+                  }
+                }
+              }
+            }
+
+            if (pendingToolCalls.length > 0) break;
+          }
+        }
+
+        // Plan Confirmation Check
+        const isUserExplicitConfirm = /^(?:confirm\s+plan|approve\s+plan|start\s+execution|proceed|continue|plan\s+approved|confirm|подтверждаю|утверждаю|начинай|выполняй|поехали)/i.test(lastUserText.trim());
+        if (isUserExplicitConfirm) {
+          session.planConfirmed = true;
+          session.planExplicitlyDemanded = false;
+          phase1NudgeCount = 0;
+          this.sessionManager.setPlanConfirmed(true);
+          this.sessionManager.setPlanExplicitlyDemanded(false);
+        }
+
+        // Plan Detection: When the model explicitly outputs <plan>...</plan> (either autonomously or when requested)
+        let detectedPlanText = '';
+        const planTagMatch = currentAssistantContent.match(/<plan>([\s\S]*?)(?:<\/plan>|$)/i);
+        if (planTagMatch) {
+          detectedPlanText = planTagMatch[1].trim();
+        } else if (session.planMode !== false && !session.planConfirmed && /(?:##?\s*(?:план(?:\s+реализации)?|implementation\s+plan)|###?\s*план)/i.test(currentAssistantContent)) {
+          // Model formatted plan as markdown checklist instead of <plan> tags
+          const listLines = currentAssistantContent.split('\n').filter(l => /^\s*(?:\d+[\.\)]|[-*]\s*\[[ xX]\])/i.test(l));
+          if (listLines.length >= 2) {
+            detectedPlanText = listLines.join('\n');
+          }
+        }
+
+        if (session.planMode !== false && !session.planConfirmed && detectedPlanText) {
+          const items: string[] = detectedPlanText.split('\n')
+            .map(l => l.trim())
+            .filter(l => /^\d+[\.\)]/i.test(l) || /^[-*]\s*\[/i.test(l))
+            .map(l => l.replace(/^(?:\d+[\.\)]|[-*])\s*(\[[ xX]\]\s*)?/, ''));
+
+          if (items.length > 0) {
+            // Planning turn: discard any accidental tool calls and halt for user confirmation
+            pendingToolCalls = [];
+            callbacks.onPlanProposed?.(detectedPlanText, items);
+
             const assistantMsg: ChatMessage = {
               id: 'asst_' + Date.now(),
               role: 'assistant',
@@ -394,41 +783,337 @@ export class AgentEngine {
               timestamp: Date.now()
             };
             this.sessionManager.addMessage(assistantMsg);
-            callbacks.onStatus('План предложен. Ожидает подтверждения...');
+            callbacks.onStatus('Plan proposed. Waiting for confirmation...');
             callbacks.onComplete('plan_proposed');
-            break; // Stop and wait for user confirmation click!
+            break; // Stop turn and await user confirmation!
           }
         }
 
-        // Record the assistant's turn
+        // If the user EXPLICITLY demanded a plan and it is not yet confirmed:
+        // Hold mutative file edits and destructive commands until plan confirmation
+        if (session.planMode !== false && session.planExplicitlyDemanded && !session.planConfirmed) {
+          pendingToolCalls = pendingToolCalls.filter(tc => {
+            const name = tc.function.name;
+            if (['create_file', 'edit_file', 'write_file', 'replace_file_content'].includes(name)) {
+              return false;
+            }
+            if (name === 'run_command' || name === 'run_terminal_command') {
+              try {
+                const args = JSON.parse(tc.function.arguments || '{}');
+                return isReadOnlyCommand(args.command);
+              } catch {
+                return false;
+              }
+            }
+            return true;
+          });
+        }
+
+        if (session.planConfirmed) {
+          // If the model emitted any stray <plan> tags in execution turns, strip them so no duplicate cards render
+          currentAssistantContent = currentAssistantContent.replace(/<plan>[\s\S]*?<\/plan>/gi, '');
+        }
+
+        // If no tool calls were generated:
+        if (pendingToolCalls.length === 0) {
+          const isGenuineQuestion = isAssistantWaitingForUser(currentAssistantContent);
+          const hasToolTagAttempt = /<(?:tool_call|function_call|tool)\b/i.test(currentAssistantContent);
+          
+          // Detect malformed/improper tool calls for validation and re-generation
+          const malformedCheck = this.detectMalformedToolCall(currentAssistantContent, currentReasoningContent, session);
+
+          // An action promise is an IDLE turn only if it's short (< 350 chars) and just promises an action without executing tools or providing a full summary
+          const isShortMonologue = currentAssistantContent.trim().length < 350;
+          const hasActionPromise = isShortMonologue && /(?:let me|i will|i'll|следующий шаг|сейчас\s+(?:я\s+)?(?:создам|отредактирую|изменю|запущу|прочитаю|посмотрю|изучу)|провер(?:ю|им|ить)?|посмотр(?:ю|им|еть)?|изуч(?:у|им|ить)?|прочита(?:ю|ем|ть)?|созда(?:м|дим|вать)?|запу(?:щу|стим|стить)?|start server|run implant)/i.test(currentAssistantContent);
+          
+          const isToolPromiseOnly = Boolean(
+            !hasToolTagAttempt && hasActionPromise
+          );
+
+          const isFinalSummary = Boolean(
+            !malformedCheck.isMalformed && (
+              currentAssistantContent.includes('<end_working>') ||
+              (!hasToolTagAttempt && !isToolPromiseOnly && currentAssistantContent.trim().length > 0)
+            )
+          );
+
+          // Phase 1 Nudge: When in Plan Mode and plan is not yet confirmed
+          if (session.agentMode && session.planMode !== false && !session.planConfirmed && !isGenuineQuestion) {
+            const hadExplorationTools = (session.messages || []).some(m => m.role === 'tool');
+            const shouldNudgePlan = isToolPromiseOnly || hadExplorationTools || (!currentAssistantContent.trim() && currentReasoningContent);
+
+            if (shouldNudgePlan && phase1NudgeCount < 2) {
+              phase1NudgeCount++;
+
+              if (currentAssistantContent.trim()) {
+                const assistantMsg: ChatMessage = {
+                  id: 'asst_' + Date.now(),
+                  role: 'assistant',
+                  content: currentAssistantContent,
+                  reasoningContent: currentReasoningContent,
+                  timestamp: Date.now()
+                };
+                this.sessionManager.addMessage(assistantMsg);
+              }
+
+              const planNudgeMsg: ChatMessage = {
+                id: 'plan_nudge_' + Date.now(),
+                role: 'user',
+                content: `CRITICAL PLANNING DIRECTIVE: You are in Plan Mode. You explored the workspace or stated an intention without executing a tool or outputting a plan.
+If you still need to inspect existing code, invoke the tool call directly (<tool_call name="read_file"> or <tool_call name="view_file_slice">).
+If you have gathered sufficient context, output the architectural concept, project file tree, and the implementation checklist inside <plan>...</plan> tags now so the user can review and approve execution.`,
+                isInternal: true,
+                timestamp: Date.now()
+              };
+              this.sessionManager.addMessage(planNudgeMsg);
+              callbacks.onStatus('Formulating plan...');
+              continue;
+            }
+          }
+
+          // Unstuck Validation: When model produced malformed / improper tool output, send to neural network for validation & re-generation
+          if (session.agentMode && malformedCheck.isMalformed && !isGenuineQuestion && (session.planConfirmed || session.planMode === false)) {
+            if (validationRetryCount < maxAutoRetries) {
+              validationRetryCount++;
+              logger.log('Agent:Unstuck', `[Validation Triggered (${validationRetryCount}/${maxAutoRetries})] ${malformedCheck.reason} - fragment: "${malformedCheck.fragment}"`);
+
+              if (currentAssistantContent.trim() || currentReasoningContent.trim()) {
+                const assistantMsg: ChatMessage = {
+                  id: 'asst_' + Date.now(),
+                  role: 'assistant',
+                  content: currentAssistantContent,
+                  reasoningContent: currentReasoningContent,
+                  timestamp: Date.now()
+                };
+                this.sessionManager.addMessage(assistantMsg);
+              }
+
+              callbacks.onActivityStep?.({
+                type: 'unstuck',
+                code: 'tool_syntax_error',
+                reason: malformedCheck.reason,
+                title: `Tool call syntax: ${malformedCheck.reason}. Requesting re-generation (${validationRetryCount}/${maxAutoRetries})...`,
+                attempt: validationRetryCount,
+                maxAttempts: maxAutoRetries,
+                startTime: Date.now()
+              });
+              callbacks.onStatus(`Validation (${validationRetryCount}/${maxAutoRetries})...`);
+
+              const validationMsg: ChatMessage = {
+                id: 'validation_' + Date.now(),
+                role: 'user',
+                content: `CRITICAL SYNTAX VALIDATION ERROR:
+Your previous response contained an invalid or incomplete tool call format that was rejected:
+Reason: ${malformedCheck.reason}
+Detected fragment: "${malformedCheck.fragment}"
+
+CORRECTION REQUIREMENT:
+You must strictly re-generate your response using exact and valid XML tool call tags.
+Do NOT omit opening tags or closing tags. Do NOT output raw shell commands without tool wrapping.
+
+- For terminal commands:
+<tool_call name="run_command">
+<command>your_command_here</command>
+</tool_call>
+
+- For writing or creating files:
+<tool_call name="write_file">
+<path>relative/path/to/file</path>
+<content>full file content</content>
+</tool_call>
+
+- For reading files:
+<tool_call name="read_file">
+<path>relative/path/to/file</path>
+</tool_call>
+
+Re-generate your response now with the proper tool call:`,
+                isInternal: true,
+                timestamp: Date.now()
+              };
+              this.sessionManager.addMessage(validationMsg);
+              continue;
+            } else if (malformedCheck.salvageableCommand) {
+              logger.log('Agent:Unstuck', `[Salvage Command] Auto-salvaging command after validation retries: "${malformedCheck.salvageableCommand}"`);
+              pendingToolCalls.push({
+                id: `call_${Date.now()}_salvaged`,
+                type: 'function',
+                function: {
+                  name: 'run_terminal_command',
+                  arguments: JSON.stringify({ command: malformedCheck.salvageableCommand })
+                }
+              });
+            }
+          }
+
+          if (session.agentMode && (session.planConfirmed || session.planMode === false) && !isFinalSummary && !isGenuineQuestion) {
+            consecutiveNudgeCount++;
+
+            if (consecutiveNudgeCount === 1) {
+              // 1st idle turn: record assistant turn if it had content, and send clean execution directive
+              if (currentAssistantContent.trim() || currentReasoningContent.trim()) {
+                const assistantMsg: ChatMessage = {
+                  id: 'asst_' + Date.now(),
+                  role: 'assistant',
+                  content: currentAssistantContent,
+                  reasoningContent: currentReasoningContent,
+                  timestamp: Date.now()
+                };
+                this.sessionManager.addMessage(assistantMsg);
+              }
+
+              const nudgeMsg: ChatMessage = {
+                id: 'nudge_' + Date.now(),
+                role: 'user',
+                content: `CRITICAL EXECUTION: Do NOT output conversational monologue or descriptions. Invoke the required tool call (<tool_call name="create_file">, <tool_call name="run_command">, etc.) directly with full code content. No preamble. If all tasks are completed, output <end_working>.`,
+                isInternal: true,
+                timestamp: Date.now()
+              };
+              this.sessionManager.addMessage(nudgeMsg);
+              callbacks.onActivityStep?.({
+                type: 'unstuck',
+                code: 'empty_after_reasoning',
+                title: `Server returned empty response after reasoning. Auto-retry step (${consecutiveNudgeCount}/${maxAutoRetries})...`,
+                attempt: consecutiveNudgeCount,
+                maxAttempts: maxAutoRetries,
+                startTime: Date.now()
+              });
+              callbacks.onStatus(`Unstuck (${consecutiveNudgeCount}/${maxAutoRetries})...`);
+              continue;
+            } else if (consecutiveNudgeCount === 2) {
+              // 2nd idle turn: record assistant turn if it had content, and prepare for silent unstuck turn 3
+              if (currentAssistantContent.trim() || currentReasoningContent.trim()) {
+                const assistantMsg: ChatMessage = {
+                  id: 'asst_' + Date.now(),
+                  role: 'assistant',
+                  content: currentAssistantContent,
+                  reasoningContent: currentReasoningContent,
+                  timestamp: Date.now()
+                };
+                this.sessionManager.addMessage(assistantMsg);
+              }
+
+              const nudgeMsg: ChatMessage = {
+                id: 'nudge_' + Date.now(),
+                role: 'user',
+                content: `SYSTEM UNSTUCK: You have produced monologue without executing tools. Call the appropriate tool now to proceed with execution, or output <end_working> if all work is completed.`,
+                isInternal: true,
+                timestamp: Date.now()
+              };
+              this.sessionManager.addMessage(nudgeMsg);
+              callbacks.onActivityStep?.({
+                type: 'unstuck',
+                code: 'empty_after_reasoning',
+                title: `Server returned empty response after reasoning. Auto-retry step (${consecutiveNudgeCount}/${maxAutoRetries})...`,
+                attempt: consecutiveNudgeCount,
+                maxAttempts: maxAutoRetries,
+                startTime: Date.now()
+              });
+              callbacks.onStatus(`Unstuck (${consecutiveNudgeCount}/${maxAutoRetries})...`);
+              continue;
+            } else {
+              // consecutiveNudgeCount >= 3: 3rd turn (silent unstuck) completed without tools or completion tag
+              if (repromptAttempts === 0) {
+                repromptAttempts++;
+                const originalUserMsgs = session.messages.filter(m => m.role === 'user' && !m.content.startsWith('CRITICAL') && !m.content.startsWith('SYSTEM') && !m.content.startsWith('Task execution'));
+                const originalTask = originalUserMsgs.length > 0 ? originalUserMsgs[originalUserMsgs.length - 1].content : 'Complete the planned tasks';
+
+                const repromptMsg: ChatMessage = {
+                  id: 'reprompt_' + Date.now(),
+                  role: 'user',
+                  content: `Task execution prompt:\n${originalTask}\n\nCRITICAL: Execute the next planned task now by invoking a tool call (<tool_call name="create_file">, <tool_call name="run_command">, etc.). Do NOT output conversational monologue. If finished, output <end_working>.`,
+                  isInternal: true,
+                  timestamp: Date.now()
+                };
+                this.sessionManager.addMessage(repromptMsg);
+                callbacks.onStatus('Agent · Re-sending prompt...');
+                continue;
+              } else {
+                // Halted after prompt re-send still yielded no actions: notify user cleanly
+                const alertMsg = 'Автономный цикл приостановлен: модель не смогла вызвать инструмент после нескольких попыток. Пожалуйста, напишите прямое указание или подтвердите продолжение.';
+                callbacks.onChunk?.(`\n\n> [!NOTE]\n> ${alertMsg}\n`);
+                callbacks.onStatus('Waiting for user input...');
+                callbacks.onComplete('stop');
+                break;
+              }
+            }
+          }
+
+          // Not an idle stuck turn: genuine question, final summary, or normal turn
+          consecutiveNudgeCount = 0;
+          phase1NudgeCount = 0;
+          repromptAttempts = 0;
+          validationRetryCount = 0;
+
+          if (!currentAssistantContent.trim()) {
+            if (touchedCodeFile) {
+              currentAssistantContent = 'Все запланированные задачи и изменения файлов успешно выполнены.';
+              callbacks.onChunk?.(currentAssistantContent);
+            } else if (emptyResponseCount < 2 && currentReasoningContent && iteration < 50) {
+              emptyResponseCount++;
+              const nudgeMsg: ChatMessage = {
+                id: 'nudge_' + Date.now(),
+                role: 'user',
+                content: 'CRITICAL: You produced reasoning/thoughts but did not output your response or execute any tool. Please provide your answer to the user now or execute the required tool call.',
+                isInternal: true,
+                timestamp: Date.now()
+              };
+              this.sessionManager.addMessage(nudgeMsg);
+              callbacks.onStatus('Awaiting model response...');
+              continue;
+            } else {
+              currentAssistantContent = 'Модель завершила цепочку рассуждений без вывода текста. Пожалуйста, отправьте запрос повторно.';
+              callbacks.onChunk?.(currentAssistantContent);
+            }
+          } else {
+            emptyResponseCount = 0;
+          }
+
+          if (!currentAssistantContent.includes('<end_working>')) {
+            callbacks.onChunk?.('\n<end_working>\n');
+          }
+
+          // Clean unexecuted / dropped tool tags so raw XML is never saved as chat text
+          const cleanSavedContent = currentAssistantContent
+            .replace(/```(?:xml|html|markdown|text|plan|bash|sh|json)?\s*(<(?:tool_call|function_call|tool)[\s>])/gi, '$1')
+            .replace(/(<\/(?:tool_call|function_call|call|tool)>)\s*```/gi, '$1')
+            .replace(/<(?:tool_call|function_call|tool)\b[^>]*>[\s\S]*?(?:<\/(?:tool_call|function_call|call|tool)>|$)/gi, '')
+            .replace(/<[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}\s+(?:call|invoke)\b[^>]*>[\s\S]*?(?:<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}(?:\s*(?:call|invoke))?>|(?=<[|\uFF5C]{1,2}DSML)|$)/gi, '')
+            .replace(/<\/?(?:[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}[^>]*|call|invoke)>/gi, '')
+            .replace(/<think>[\s\S]*?<\/think>/gi, '')
+            .trim();
+
+          const assistantMsg: ChatMessage = {
+            id: 'asst_' + Date.now(),
+            role: 'assistant',
+            content: cleanSavedContent || currentAssistantContent,
+            reasoningContent: currentReasoningContent,
+            timestamp: Date.now()
+          };
+          this.sessionManager.addMessage(assistantMsg);
+
+          callbacks.onStatus(isGenuineQuestion ? 'Waiting for user input...' : 'Ready');
+          callbacks.onComplete('stop');
+          break;
+        }
+
+        // Tool calls were found: reset consecutive idle count and reprompt attempts!
+        consecutiveNudgeCount = 0;
+        phase1NudgeCount = 0;
+        repromptAttempts = 0;
+        emptyResponseCount = 0;
+        validationRetryCount = 0;
+
+        // Record the assistant's turn with tools
         const assistantMsg: ChatMessage = {
           id: 'asst_' + Date.now(),
           role: 'assistant',
           content: currentAssistantContent,
           reasoningContent: currentReasoningContent,
-          toolCalls: pendingToolCalls.length > 0 ? pendingToolCalls : undefined,
+          toolCalls: pendingToolCalls,
           timestamp: Date.now()
         };
         this.sessionManager.addMessage(assistantMsg);
-
-        // If no tool calls were generated, check if we need to request the mandatory final summary report
-        if (pendingToolCalls.length === 0) {
-          const hasReport = /(?:###\s*(?:Что было сделано|Что сделано|Итог|Результат))/i.test(currentAssistantContent);
-          if (iteration > 1 && touchedCodeFile && !hasReport && !this.abortController?.signal.aborted) {
-            const finalReportPrompt: ChatMessage = {
-              id: 'req_report_' + Date.now(),
-              role: 'user',
-              content: 'Все задачи и шаги плана выполнены. Теперь обязательно напиши подробный итоговый отчет на русском языке по шаблону:\n### Что было сделано и реализовано:\n1. ...\n2. [Результаты запуска тестов и верификации]\nКод полностью готов к работе! 🚀',
-              timestamp: Date.now()
-            };
-            this.sessionManager.addMessage(finalReportPrompt);
-            continue;
-          }
-
-          callbacks.onStatus('Готов');
-          callbacks.onComplete('stop');
-          break;
-        }
 
         // Execute tool calls
         const executedResults: { name: string; output: string; error?: boolean }[] = [];
@@ -449,62 +1134,148 @@ export class AgentEngine {
           if (isCommand) {
             toolArgs.taskId = taskId;
             callbacks.onTaskStart?.(taskId, toolArgs.command);
+            const rootName = path.basename(this.toolExecutor.getWorkspaceRoot()) || 'workspace';
+            callbacks.onActivityStep?.({
+              type: 'command',
+              title: `Ran ${toolArgs.command}`,
+              command: toolArgs.command,
+              cwd: `...\\${rootName}`,
+              status: 'running',
+              id: taskId
+            });
           }
 
           callbacks.onToolStart(tc.id, toolName, toolArgs);
-          callbacks.onStatus(`Выполнение: ${toolName}...`);
+          callbacks.onStatus(isCommand ? `Running: ${(toolArgs.command || '').slice(0, 40)}...` : `Executing: ${toolName}...`);
 
           if (toolName === 'replace_file_content' || toolName === 'write_file' || toolName === 'create_file' || toolName === 'edit_file') {
             touchedCodeFile = true;
             lastTouchedFile = toolArgs.path || '';
+            lastReadFilePath = '';
+            consecutiveFileReadCount = 0;
+          } else if (toolName === 'read_file' || toolName === 'view_file_slice') {
+            const currentPath = toolArgs.path || toolArgs.filePath || '';
+            if (currentPath === lastReadFilePath) {
+              consecutiveFileReadCount++;
+            } else {
+              lastReadFilePath = currentPath;
+              consecutiveFileReadCount = 1;
+            }
           }
 
-          const result = await this.toolExecutor.execute(toolName, toolArgs, taskId, this.abortController?.signal || undefined);
+          let result: { output: string; error?: boolean };
+          const toolExecStart = Date.now();
+          logger.log('Tool', `[${toolName}] Executing with args: ${JSON.stringify(toolArgs).slice(0, 160)}...`);
+
+          if (session.planConfirmed && (toolName === 'read_file' || toolName === 'view_file_slice') && consecutiveFileReadCount >= 3) {
+            result = {
+              output: `[HALTED READ-LOOP]: Content of '${lastReadFilePath}' was already retrieved in prior turns. You have the exact lines. You are forbidden from calling read_file again. Proceed directly to replace_file_content, write_file, or run_command now.`,
+              error: false
+            };
+          } else {
+            result = await this.toolExecutor.execute(
+              toolName,
+              toolArgs,
+              taskId,
+              this.abortController?.signal || undefined,
+              {
+                sandboxMode: session.agentMode === false ? 'bypass' : (session.sandboxMode || 'local'),
+                allowedCommands: session.allowedCommands || [],
+                onPermissionRequest: async (req) => {
+                  if (!this.isRunning || this.abortController?.signal?.aborted) return 'deny';
+                  callbacks.onStatus(`Waiting for permission: ${req.command.slice(0, 35)}...`);
+                  if (!callbacks.onCommandPermissionRequest) return 'run_once';
+                  const dec = await callbacks.onCommandPermissionRequest(req);
+                  if (!this.isRunning || this.abortController?.signal?.aborted) return 'deny';
+                  if (dec === 'always_allow') {
+                    this.sessionManager.allowCommand(req.command);
+                  }
+                  callbacks.onStatus(isCommand ? `Running: ${(toolArgs.command || '').slice(0, 40)}...` : `Executing: ${toolName}...`);
+                  return dec;
+                }
+              }
+            );
+
+            const toolDur = ((Date.now() - toolExecStart) / 1000).toFixed(2);
+            logger.log('Tool', `[${toolName}] Completed in ${toolDur}s (output: ${result.output.length} chars, error: ${Boolean(result.error)})`);
+
+            if (!this.isRunning || this.abortController?.signal?.aborted) {
+              break;
+            }
+
+            if (session.planConfirmed && (toolName === 'read_file' || toolName === 'view_file_slice') && consecutiveFileReadCount === 2) {
+              result.output += `\n\n[NOTICE]: File '${lastReadFilePath}' was re-read. You have sufficient information. Proceed immediately to edit_file/replace_file_content. Do not call read_file on this file again.`;
+            }
+          }
+
+          if (!this.isRunning || this.abortController?.signal?.aborted) {
+            break;
+          }
           executedResults.push({ name: toolName, output: result.output, error: result.error });
 
-          // Emit visual activity step matching Antigravity feed
-          if (toolName === 'create_file' || toolName === 'write_file') {
-            const lineCount = toolArgs.content ? toolArgs.content.split('\n').length : 0;
-            const ext = path.extname(toolArgs.path).slice(1).toUpperCase() || 'FILE';
-            callbacks.onActivityStep?.({
-              type: 'edit',
-              title: `Created ${ext} ${path.basename(toolArgs.path)} (+${lineCount} -0)`,
-              path: toolArgs.path,
-              added: lineCount,
-              removed: 0
-            });
-          } else if (toolName === 'edit_file' || toolName === 'replace_file_content') {
-            const sLines = (toolArgs.targetContent || toolArgs.search || '').split('\n').length;
-            const rLines = (toolArgs.replacementContent || toolArgs.replace || '').split('\n').length;
-            const ext = path.extname(toolArgs.path).slice(1).toUpperCase() || 'FILE';
-            callbacks.onActivityStep?.({
-              type: 'edit',
-              title: `Edited ${ext} ${path.basename(toolArgs.path)} +${rLines} -${sLines}`,
-              path: toolArgs.path,
-              added: rLines,
-              removed: sLines
-            });
+          // Emit visual activity step matching Antigravity feed (only on success!)
+          if (!result.error) {
+            if (toolName === 'create_file' || toolName === 'write_file') {
+              const lineCount = toolArgs.content ? toolArgs.content.split('\n').length : 0;
+              callbacks.onActivityStep?.({
+                type: 'create',
+                title: `Created ${path.basename(toolArgs.path)} +${lineCount}`,
+                path: toolArgs.path,
+                added: lineCount,
+                removed: 0
+              });
+            } else if (toolName === 'edit_file' || toolName === 'replace_file_content') {
+              const sLines = (toolArgs.targetContent || toolArgs.search || '').split('\n').length;
+              const rLines = (toolArgs.replacementContent || toolArgs.replace || '').split('\n').length;
+              callbacks.onActivityStep?.({
+                type: 'edit',
+                title: `Edited ${path.basename(toolArgs.path)} +${rLines} -${sLines}`,
+                path: toolArgs.path,
+                added: rLines,
+                removed: sLines
+              });
+            }
           } else if (toolName === 'read_file' || toolName === 'view_file_slice') {
-            const range = toolArgs.startLine && toolArgs.endLine ? ` (строки ${toolArgs.startLine}-${toolArgs.endLine})` : '';
             callbacks.onActivityStep?.({
-              type: 'explore',
-              title: `Explored 1 file (${path.basename(toolArgs.path)}${range})`,
-              path: toolArgs.path
+              type: 'analyze',
+              title: `Analyzed ${path.basename(toolArgs.path)}`,
+              path: toolArgs.path,
+              startLine: toolArgs.startLine || 1,
+              endLine: toolArgs.endLine || (toolArgs.startLine ? toolArgs.startLine + 50 : undefined)
+            });
+          } else if (toolName === 'search_files' || toolName === 'grep_search') {
+            const matches = result.output.split('\n').filter(l => l.trim() && !l.includes('No matches found')).length;
+            callbacks.onActivityStep?.({
+              type: 'search',
+              query: toolArgs.query || '',
+              resultCount: matches,
+              title: `Searched ${toolArgs.query || ''}`
             });
           } else if (toolName === 'list_files' || toolName === 'list_workspace_files') {
             const count = result.output.split('\n').filter(Boolean).length;
-            const isEmp = count === 0 || /empty/i.test(result.output);
             callbacks.onActivityStep?.({
               type: 'explore',
-              title: isEmp ? 'Explored workspace (0 files / empty)' : `Explored workspace (${count} items)`,
+              title: `Explored workspace (${count} items)`,
               detail: result.output
             });
+          } else if (toolName === 'get_diagnostics' || toolName === 'diagnostics') {
+            callbacks.onActivityStep?.({
+              type: 'diagnostics',
+              title: `Checked diagnostics ${path.basename(toolArgs.filePath || toolArgs.path || 'workspace')}`,
+              path: toolArgs.filePath || toolArgs.path
+            });
           } else if (isCommand) {
+            const rootName = path.basename(this.toolExecutor.getWorkspaceRoot()) || 'workspace';
             callbacks.onActivityStep?.({
               type: 'command',
               title: `Ran ${toolArgs.command}`,
+              command: toolArgs.command,
+              cwd: `...\\${rootName}`,
+              output: result.output,
               detail: result.output,
-              exitCode: result.error ? 1 : 0
+              exitCode: result.error ? 1 : 0,
+              status: result.error ? 'error' : 'completed',
+              id: taskId
             });
             callbacks.onTaskEnd?.(taskId, toolArgs.command, result.error ? 1 : 0, result.output);
           }
@@ -520,12 +1291,24 @@ export class AgentEngine {
 
           callbacks.onToolEnd(tc.id, toolName, result.output, result.error);
 
+          let stepAdded = 0;
+          let stepRemoved = 0;
+          if (toolName === 'create_file' || toolName === 'write_file') {
+            stepAdded = toolArgs.content ? toolArgs.content.split('\n').length : 0;
+          } else if (toolName === 'edit_file' || toolName === 'replace_file_content') {
+            stepRemoved = (toolArgs.targetContent || toolArgs.search || '').split('\n').length;
+            stepAdded = (toolArgs.replacementContent || toolArgs.replace || '').split('\n').length;
+          }
+
           const toolMsg: ChatMessage = {
             id: 'tool_' + Date.now(),
             role: 'tool',
             content: result.output,
             toolCallId: tc.id,
             name: toolName,
+            filePath: toolArgs.path || toolArgs.filePath,
+            added: stepAdded,
+            removed: stepRemoved,
             timestamp: Date.now()
           };
           this.sessionManager.addMessage(toolMsg);
@@ -535,31 +1318,33 @@ export class AgentEngine {
           break;
         }
 
-        // If in Agent Mode, continue the autonomous step loop
-        if (session.agentMode && pendingToolCalls.length > 0 && iteration < maxIterations) {
-          callbacks.onStatus(`ИИ-агент · шаг ${iteration + 1} (автономный цикл)`);
-          const observationContent = executedResults
-            .map(r => `[Tool Result: ${r.name}]:\n${r.output}`)
-            .join('\n\n');
+        const hasQuestionTool = pendingToolCalls.some(tc => {
+          const n = tc.function.name;
+          return n === 'ask_user' || n === 'ask_question' || n === 'confirm' || n === 'notify_user';
+        });
 
-          const stepFollowUp: ChatMessage = {
-            id: 'obs_' + Date.now(),
-            role: 'tool',
-            content: `${observationContent}\n\nProceed with the next steps or finish the implementation. Verify code works cleanly and mark off completed plan items.`,
-            timestamp: Date.now()
-          };
-          this.sessionManager.addMessage(stepFollowUp);
+        const isWaitingUser = isAssistantWaitingForUser(currentAssistantContent);
+
+        if (hasQuestionTool || isWaitingUser) {
+          callbacks.onStatus('Waiting for user input...');
+          callbacks.onComplete('stop');
+          break;
+        }
+
+        // If in Agent Mode, continue the autonomous step loop
+        if (session.agentMode && pendingToolCalls.length > 0) {
+          callbacks.onStatus(`Agent · Step ${iteration + 1} (autonomous cycle)`);
           continue;
         }
 
         // Self-Healing Diagnostics Check
         if (touchedCodeFile && selfHealingAttempts < maxRetries) {
-          callbacks.onStatus('Проверка синтаксиса и диагностики...');
+          callbacks.onStatus('Checking syntax and diagnostics...');
           const diagResult = await this.toolExecutor.getDiagnostics(lastTouchedFile);
 
           if (diagResult.error) {
             selfHealingAttempts++;
-            callbacks.onStatus(`Обнаружены ошибки. Авто-исправление ${selfHealingAttempts}/${maxRetries}...`);
+            callbacks.onStatus(`Errors detected. Self-healing ${selfHealingAttempts}/${maxRetries}...`);
 
             const autoHealingMsg: ChatMessage = {
               id: 'healing_' + Date.now(),
@@ -574,24 +1359,39 @@ export class AgentEngine {
       }
 
       if (this.isRunning && !this.abortController?.signal?.aborted) {
-        callbacks.onStatus('Готов');
+        callbacks.onStatus('Ready');
         callbacks.onComplete('stop');
       }
     } catch (err: any) {
       if (err.name === 'AbortError' || this.abortController?.signal?.aborted || err.message === 'Operation cancelled by user') {
-        callbacks.onStatus('Остановлено пользователем');
+        callbacks.onStatus('Stopped by user');
         callbacks.onComplete('cancelled');
       } else {
         callbacks.onError(err.message || String(err));
       }
     } finally {
+      const currentSession = this.sessionManager.getCurrentSession();
+      if (currentSession) {
+        currentSession.messages = (currentSession.messages || []).filter(m =>
+          !m.isInternal &&
+          !m.id?.startsWith('nudge_') &&
+          !m.id?.startsWith('plan_nudge_') &&
+          !m.id?.startsWith('reprompt_') &&
+          !m.content?.startsWith('CRITICAL EXECUTION:') &&
+          !m.content?.startsWith('SYSTEM UNSTUCK:') &&
+          !m.content?.startsWith('Task execution prompt:') &&
+          !m.content?.startsWith('Exploration complete') &&
+          !m.content?.startsWith('Present the architectural concept')
+        );
+      }
+      this.sessionManager.saveToStorage();
       this.isRunning = false;
       this.abortController = null;
       this.activeCallbacks = null;
     }
   }
 
-  private pruneMessagesForRequest(systemPrompt: string, allMessages: ChatMessage[], maxLimit: number = 45): ChatMessage[] {
+  private pruneMessagesForRequest(systemPrompt: string, allMessages: ChatMessage[], maxLimit: number = 120, session?: ChatSession): ChatMessage[] {
     const sysMsg: ChatMessage = {
       id: 'sys_prompt',
       role: 'system',
@@ -599,34 +1399,162 @@ export class AgentEngine {
       timestamp: 0
     };
 
-    // Helper to truncate huge individual message contents (>50k chars) to avoid character limit errors
+    // Helper to truncate huge individual message contents to avoid character and token limit blowouts.
+    // Tool outputs (terminal outputs, big file reads, dir trees) are the #1 cause of context amnesia!
     const sanitizeMessage = (m: ChatMessage): ChatMessage => {
-      if (m.content && m.content.length > 50000) {
-        const head = m.content.slice(0, 30000);
-        const tail = m.content.slice(-15000);
+      // With 1M context, allow rich tool outputs (up to 60,000 chars, safely under 131k API cap), and user/asst up to 100,000 chars
+      const limit = m.role === 'tool' ? 60000 : 100000;
+      if (m.content && m.content.length > limit) {
+        const head = m.content.slice(0, Math.floor(limit * 0.65));
+        const tail = m.content.slice(-Math.floor(limit * 0.25));
         return {
           ...m,
-          content: `${head}\n\n... [Вывод усечен для оптимизации контекста] ...\n\n${tail}`
+          content: `${head}\n\n... [Output truncated (${m.content.length} chars) for context efficiency] ...\n\n${tail}`
         };
       }
       return m;
     };
 
-    // If total messages is small, send everything sanitized
-    if (allMessages.length <= maxLimit) {
-      return [sysMsg, ...allMessages.map(sanitizeMessage)];
+    const lastMessage = allMessages.length > 0 ? allMessages[allMessages.length - 1] : null;
+    const isTrailingDirective = Boolean(lastMessage && (
+      lastMessage.isInternal ||
+      lastMessage.id?.startsWith('nudge_') ||
+      lastMessage.id?.startsWith('plan_nudge_') ||
+      lastMessage.id?.startsWith('reprompt_') ||
+      lastMessage.content?.startsWith('CRITICAL EXECUTION:') ||
+      lastMessage.content?.startsWith('SYSTEM UNSTUCK:') ||
+      lastMessage.content?.startsWith('Task execution prompt:') ||
+      lastMessage.content?.startsWith('Exploration complete') ||
+      lastMessage.content?.startsWith('Present the architectural concept')
+    ));
+
+    let activeMessages = allMessages.filter((m, idx) => {
+      // Always preserve the trailing directive / unstuck message for the current turn
+      if (isTrailingDirective && idx === allMessages.length - 1) {
+        return true;
+      }
+      return (
+        !m.isInternal &&
+        !m.id?.startsWith('nudge_') &&
+        !m.id?.startsWith('plan_nudge_') &&
+        !m.id?.startsWith('reprompt_') &&
+        !m.id?.startsWith('compact_') &&
+        !m.content?.startsWith('CRITICAL EXECUTION:') &&
+        !m.content?.startsWith('SYSTEM UNSTUCK:') &&
+        !m.content?.startsWith('Task execution prompt:') &&
+        !m.content?.startsWith('Exploration complete') &&
+        !m.content?.startsWith('Present the architectural concept') &&
+        !m.content?.startsWith('[COMPACTED CONTEXT BRIEFING]')
+      );
+    });
+
+    const finalizeResult = (list: ChatMessage[]): ChatMessage[] => {
+      const merged = this.collapseConsecutiveUserMessages(list);
+      // Guarantee that the request sent to LLM never ends on an assistant message
+      if (merged.length > 1 && merged[merged.length - 1].role === 'assistant') {
+        merged.push({
+          id: 'cont_' + Date.now(),
+          role: 'user',
+          content: 'Continue your work and proceed to the next step.',
+          isInternal: true,
+          timestamp: Date.now()
+        });
+      }
+      return merged;
+    };
+
+    // If compaction summary exists, inject it as internal briefing and slice messages after the compaction boundary
+    if (session?.compactedSummary) {
+      let cutIdx = -1;
+      if (session.compactedAtMessageId) {
+        cutIdx = activeMessages.findIndex(m => m.id === session.compactedAtMessageId);
+      }
+      if (cutIdx !== -1) {
+        activeMessages = activeMessages.slice(cutIdx + 1);
+      } else {
+        activeMessages = activeMessages.slice(Math.max(0, activeMessages.length - 10));
+      }
+
+      // Ensure no orphaned tool message at boundary
+      let startIdx = 0;
+      while (startIdx < activeMessages.length && activeMessages[startIdx].role === 'tool') {
+        startIdx++;
+      }
+      activeMessages = activeMessages.slice(startIdx);
+
+      const briefingMsgs: ChatMessage[] = [];
+      const CHUNK_SIZE = 100000;
+      const summaryText = session.compactedSummary || '';
+      if (summaryText.length <= CHUNK_SIZE) {
+        briefingMsgs.push({
+          id: 'compact_briefing_user',
+          role: 'user',
+          content: `[COMPACTED AGENT CONTEXT]\n${summaryText}`,
+          isInternal: true,
+          timestamp: 0
+        });
+      } else {
+        let offset = 0;
+        let partIdx = 1;
+        const totalParts = Math.ceil(summaryText.length / CHUNK_SIZE);
+        while (offset < summaryText.length) {
+          const slice = summaryText.slice(offset, offset + CHUNK_SIZE);
+          briefingMsgs.push({
+            id: `compact_briefing_user_${partIdx}`,
+            role: 'user',
+            content: `[COMPACTED AGENT CONTEXT PART ${partIdx}/${totalParts}]\n${slice}`,
+            isInternal: true,
+            timestamp: 0
+          });
+          if (partIdx < totalParts) {
+            briefingMsgs.push({
+              id: `compact_briefing_ack_${partIdx}`,
+              role: 'assistant',
+              content: `Context part ${partIdx}/${totalParts} loaded.`,
+              isInternal: true,
+              timestamp: 0
+            });
+          }
+          offset += CHUNK_SIZE;
+          partIdx++;
+        }
+      }
+
+      briefingMsgs.push({
+        id: 'compact_briefing_asst',
+        role: 'assistant',
+        content: 'Context briefing recognized. Ready to proceed with the next task step.',
+        isInternal: true,
+        timestamp: 0
+      });
+
+      const rawResult = [sysMsg, ...briefingMsgs, ...activeMessages.map(sanitizeMessage)];
+      return finalizeResult(rawResult);
+    }
+
+    // Helper to merge consecutive user messages (e.g. repeated user 'continue' clicks)
+    // to strictly preserve clean turn-taking and avoid triggering proxy spam/loop filters.
+    if (activeMessages.length <= maxLimit) {
+      return finalizeResult([sysMsg, ...activeMessages.map(sanitizeMessage)]);
     }
 
     // Always preserve the initial user intent (first user message)
-    const firstUserMsg = allMessages.find(m => m.role === 'user');
+    const firstUserMsg = activeMessages.find(m => m.role === 'user');
 
     // Find any proposed plan message if exists
-    const planMsg = allMessages.find(m => m.role === 'assistant' && (m.content.includes('<plan>') || m.content.includes('### План')));
+    const planMsg = activeMessages.find(m => m.role === 'assistant' && (m.content.includes('<plan>') || m.content.includes('### Plan') || m.content.includes('### Implementation Plan')));
 
     // Get the most recent messages (sliding window)
     const reservedSlots = 1 + (firstUserMsg ? 1 : 0) + (planMsg ? 1 : 0);
-    const recentCount = Math.max(10, maxLimit - reservedSlots);
-    const recentMessages = allMessages.slice(-recentCount);
+    const recentCount = Math.max(8, maxLimit - reservedSlots);
+    let startIdx = Math.max(0, activeMessages.length - recentCount);
+
+    // CRITICAL: Prevent orphaned tool messages at the boundary!
+    // If startIdx points to a 'tool' message, step backwards to include its parent assistant
+    while (startIdx > 0 && activeMessages[startIdx].role === 'tool') {
+      startIdx--;
+    }
+    const recentMessages = activeMessages.slice(startIdx);
 
     const result: ChatMessage[] = [sysMsg];
 
@@ -645,6 +1573,609 @@ export class AgentEngine {
       }
     }
 
-    return result;
+    return finalizeResult(result);
+  }
+
+  private collapseConsecutiveUserMessages(list: ChatMessage[]): ChatMessage[] {
+    const merged: ChatMessage[] = [];
+    for (const msg of list) {
+      if (merged.length > 0 && merged[merged.length - 1].role === 'user' && msg.role === 'user') {
+        const prev = merged[merged.length - 1];
+        if (prev.content.trim() === msg.content.trim()) {
+          continue;
+        }
+        prev.content = `${prev.content}\n\n${msg.content}`;
+      } else {
+        merged.push(msg);
+      }
+    }
+    return merged;
+  }
+
+  private detectMalformedToolCall(
+    content: string,
+    reasoning: string,
+    session?: ChatSession
+  ): { isMalformed: boolean; reason: string; fragment: string; salvageableCommand?: string } {
+    const rawContent = (content || '').trim();
+    const rawReasoning = (reasoning || '').trim();
+
+    // 1. Orphan closing tag without opening tag: e.g. "mkdir ... </command>" or "echo ... </tool_call>"
+    const orphanCloseMatch = rawContent.match(/(?:^|\n|[\s\S]{0,120}?)([\w\s\\/.\-&|;:"']{2,200}?)\s*<\/(command|tool_call|function_call|call|tool|write_file|create_file|replace_file_content|edit_file|read_file)>/i);
+    if (orphanCloseMatch) {
+      const tag = orphanCloseMatch[2].toLowerCase();
+      const snippet = orphanCloseMatch[1].trim();
+      const hasMatchingOpen = new RegExp(`<${tag}\\b`, 'i').test(rawContent) ||
+        (tag === 'command' && (/<run_command\b/i.test(rawContent) || /<tool_call\b/i.test(rawContent)));
+      if (!hasMatchingOpen && snippet) {
+        return {
+          isMalformed: true,
+          reason: `Found closing tag </${tag}> without opening <${tag}> tag`,
+          fragment: orphanCloseMatch[0].trim().slice(0, 150),
+          salvageableCommand: tag === 'command' ? snippet : undefined
+        };
+      }
+    }
+
+    // 2. Unclosed opening tool tag: e.g. <tool_call name="run_command"> without </tool_call>
+    const unclosedToolCall = rawContent.match(/<(?:tool_call|function_call|tool)\s+[^>]*name=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*)$/i);
+    if (unclosedToolCall && !/<\/(?:tool_call|function_call|call|tool)>/i.test(unclosedToolCall[0])) {
+      return {
+        isMalformed: true,
+        reason: `Unclosed <tool_call> block for "${unclosedToolCall[1]}" (missing closing tag)`,
+        fragment: unclosedToolCall[0].slice(0, 150)
+      };
+    }
+
+    // 3. Unclosed <command> tag
+    if (/<command\b[^>]*>/i.test(rawContent) && !/<\/command>/i.test(rawContent)) {
+      return {
+        isMalformed: true,
+        reason: `Unclosed <command> tag (missing </command>)`,
+        fragment: rawContent.slice(0, 150)
+      };
+    }
+
+    // 4. Broken or unclosed DSML block
+    if (/<[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}\s+(?:call|invoke)/i.test(rawContent) &&
+        !/<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}>/i.test(rawContent)) {
+      return {
+        isMalformed: true,
+        reason: `Malformed or unclosed DSML tool invocation block`,
+        fragment: rawContent.slice(0, 150)
+      };
+    }
+
+    // 5. Raw JSON tool call printed in plain text without XML wrapping: e.g. {"name": "run_command", "arguments": ...}
+    const rawJsonMatch = rawContent.match(/\{[\s\r\n]*"(?:name|tool|function)"[\s\r\n]*:[\s\r\n]*"(?:run_command|write_file|create_file|replace_file_content|read_file|list_files)"[\s\S]*?\}/i);
+    if (rawJsonMatch) {
+      return {
+        isMalformed: true,
+        reason: `Raw JSON tool call passed without required XML tag wrapping (<tool_call name="...">)`,
+        fragment: rawJsonMatch[0].slice(0, 150)
+      };
+    }
+
+    // 6. Model produced empty or whitespace content, but reasoning contains explicit action promise in execution mode
+    if (!rawContent && rawReasoning && session?.agentMode && (session.planConfirmed || session.planMode === false)) {
+      const reasoningAction = /(?:let me create|let me execute|let me run|i will create|i will now create|i will run|i'll run|i'll create|first create the|создам папку|создам файл|выполню команду|запущу команду)/i.test(rawReasoning);
+      if (reasoningAction) {
+        return {
+          isMalformed: true,
+          reason: `Model formulated action in reasoning/thinking, but produced an empty response body without emitting tool calls`,
+          fragment: rawReasoning.slice(0, 150)
+        };
+      }
+    }
+
+    // 7. Standalone raw shell command output in execution phase with no narrative text
+    if (rawContent && session?.agentMode && (session.planConfirmed || session.planMode === false)) {
+      const isSingleShellCmd = /^(?:mkdir|cd|python|node|npm|git|touch|cat|ls|dir|rm|pip)\s+[^\n]{3,150}$/i.test(rawContent);
+      if (isSingleShellCmd) {
+        return {
+          isMalformed: true,
+          reason: `Raw shell command emitted without XML tool tags`,
+          fragment: rawContent,
+          salvageableCommand: rawContent
+        };
+      }
+    }
+
+    return { isMalformed: false, reason: '', fragment: '' };
+  }
+
+  public parseToolCallsFromContent(content: string, existingCallsCount: number = 0, session?: ChatSession): ToolCall[] {
+    const toolCalls: ToolCall[] = [];
+    if (!content) return toolCalls;
+
+    const processSingleCall = (rawToolName: string, inner: string) => {
+      const callId = `call_${Date.now()}_${existingCallsCount + toolCalls.length}`;
+
+      // Normalize tool names to supported tool functions
+      let toolName = rawToolName.trim();
+      if (toolName === 'list_files' || toolName === 'ls' || toolName === 'dir') {
+        toolName = 'list_workspace_files';
+      } else if (toolName === 'read_file' || toolName === 'view_file' || toolName === 'cat') {
+        toolName = 'view_file_slice';
+      } else if (toolName === 'edit_file') {
+        toolName = 'replace_file_content';
+      } else if (toolName === 'create_file') {
+        toolName = 'write_file';
+      } else if (toolName === 'run_command' || toolName === 'bash' || toolName === 'terminal' || toolName === 'cmd' || toolName === 'exec' || toolName === 'command') {
+        toolName = 'run_terminal_command';
+      } else if (toolName === 'diagnostics') {
+        toolName = 'get_diagnostics';
+      } else if (toolName === 'grep' || toolName === 'find_files') {
+        toolName = 'search_files';
+      } else if (toolName === 'ask_question' || toolName === 'ask' || toolName === 'question' || toolName === 'confirm' || toolName === 'notify_user') {
+        toolName = 'ask_user';
+      }
+
+      let toolArgs: any = {};
+
+      // If the model wrapped arguments in JSON inside the tag
+      if (inner.startsWith('{') && inner.endsWith('}')) {
+        try {
+          toolArgs = JSON.parse(inner);
+        } catch {}
+      }
+
+      if (Object.keys(toolArgs).length === 0) {
+        // Extract DSML parameters if present: <||DSML|| parameter name="..." ...>VALUE
+        const dsmlParams: Record<string, string> = {};
+        const dsmlParamRegex = /<[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}\s+parameter\s+name=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)(?:<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}(?:\s*parameter)?>|(?=<[|\uFF5C]{1,2}DSML)|$)/gi;
+        let dMatch: RegExpExecArray | null;
+        while ((dMatch = dsmlParamRegex.exec(inner)) !== null) {
+          dsmlParams[dMatch[1].trim()] = dMatch[2].trim();
+        }
+
+        if (toolName === 'write_file') {
+          const pm = inner.match(/<(?:path|file|filepath)>([\s\S]*?)<\/(?:path|file|filepath)>/i);
+          const cm = inner.match(/<content>([\s\S]*?)<\/content>/i);
+          const om = inner.match(/<overwrite>(true|false)<\/overwrite>/i);
+          const pathVal = dsmlParams.path || dsmlParams.file || dsmlParams.filepath || (pm ? pm[1].trim() : '');
+          const contentVal = dsmlParams.content !== undefined ? dsmlParams.content : (cm ? cm[1] : inner.replace(/<(?:path|file|filepath)>[\s\S]*?<\/(?:path|file|filepath)>/i, '').trim());
+          const overwriteVal = dsmlParams.overwrite !== undefined ? dsmlParams.overwrite.toLowerCase() === 'true' : (om ? om[1].toLowerCase() === 'true' : false);
+          toolArgs = {
+            path: pathVal,
+            content: contentVal,
+            overwrite: overwriteVal
+          };
+        } else if (toolName === 'replace_file_content') {
+          const pm = inner.match(/<(?:path|file|filepath)>([\s\S]*?)<\/(?:path|file|filepath)>/i);
+          const sm = inner.match(/<(?:search|target|targetContent|original|before)>([\s\S]*?)<\/(?:search|target|targetContent|original|before)>/i);
+          const rm = inner.match(/<(?:replace|replacement|replacementContent|after)>([\s\S]*?)<\/(?:replace|replacement|replacementContent|after)>/i);
+          toolArgs = {
+            path: dsmlParams.path || dsmlParams.file || (pm ? pm[1].trim() : ''),
+            targetContent: dsmlParams.targetContent || dsmlParams.search || dsmlParams.target || (sm ? sm[1] : ''),
+            replacementContent: dsmlParams.replacementContent || dsmlParams.replace || dsmlParams.replacement || (rm ? rm[1] : '')
+          };
+        } else if (toolName === 'view_file_slice') {
+          const pm = inner.match(/<(?:path|file|filepath)>([\s\S]*?)<\/(?:path|file|filepath)>/i);
+          let rawPath = dsmlParams.path || dsmlParams.file || (pm ? pm[1].trim() : '');
+          let startLine = dsmlParams.start_line ? parseInt(dsmlParams.start_line, 10) : (dsmlParams.startLine ? parseInt(dsmlParams.startLine, 10) : 1);
+          let endLine = dsmlParams.end_line ? parseInt(dsmlParams.end_line, 10) : (dsmlParams.endLine ? parseInt(dsmlParams.endLine, 10) : 200);
+
+          // Parse #L1-65 or :1-65 in path
+          const hashMatch = rawPath.match(/[#:](?:L)?(\d+)(?:-(?:L)?(\d+))?$/i);
+          if (hashMatch) {
+            startLine = parseInt(hashMatch[1], 10);
+            endLine = hashMatch[2] ? parseInt(hashMatch[2], 10) : startLine + 100;
+            rawPath = rawPath.replace(/[#:](?:L)?(\d+)(?:-(?:L)?(\d+))?$/i, '').trim();
+          }
+
+          const linesMatch = inner.match(/<(?:lines|range)>(\d+)\s*[-:]\s*(\d+)<\/(?:lines|range)>/i);
+          if (linesMatch) {
+            startLine = parseInt(linesMatch[1], 10);
+            endLine = parseInt(linesMatch[2], 10);
+          } else {
+            const sMatch = inner.match(/<(?:start_line|startLine|start)>(\d+)<\/(?:start_line|startLine|start)>/i);
+            if (sMatch) startLine = parseInt(sMatch[1], 10);
+            const eMatch = inner.match(/<(?:end_line|endLine|end)>(\d+)<\/(?:end_line|endLine|end)>/i);
+            if (eMatch) endLine = parseInt(eMatch[1], 10);
+          }
+
+          toolArgs = { path: rawPath, startLine, endLine };
+        } else if (toolName === 'run_terminal_command') {
+          const cm = inner.match(/<(?:command|cmd)>([\s\S]*?)<\/(?:command|cmd)>/i);
+          const cwdMatch = inner.match(/<(?:cwd|dir)>([\s\S]*?)<\/(?:cwd|dir)>/i);
+          let rawCmd = dsmlParams.command || dsmlParams.cmd || (cm ? cm[1].trim() : inner.trim());
+          rawCmd = rawCmd.replace(/<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}(?:\s*(?:call|invoke))?>/gi, '').trim();
+          toolArgs = {
+            command: rawCmd,
+            cwd: dsmlParams.cwd || dsmlParams.dir || (cwdMatch ? cwdMatch[1].trim() : undefined)
+          };
+        } else if (toolName === 'list_workspace_files') {
+          const pm = inner.match(/<(?:path|folder|dir)>([\s\S]*?)<\/(?:path|folder|dir)>/i);
+          const rm = inner.match(/<recursive>(true|false)<\/recursive>/i);
+          let folder = dsmlParams.path || dsmlParams.folder || dsmlParams.dir || (pm ? pm[1].trim() : (inner.trim() && !inner.trim().includes('<') ? inner.trim() : '.'));
+          toolArgs = {
+            folder: folder || '.',
+            recursive: dsmlParams.recursive !== undefined ? dsmlParams.recursive.toLowerCase() === 'true' : (rm ? rm[1].toLowerCase() === 'true' : false)
+          };
+        } else if (toolName === 'get_diagnostics') {
+          const pm = inner.match(/<(?:filePath|path|file)>([\s\S]*?)<\/(?:filePath|path|file)>/i);
+          toolArgs = {
+            filePath: dsmlParams.filePath || dsmlParams.path || (pm ? pm[1].trim() : undefined)
+          };
+        } else if (toolName === 'search_files') {
+          const qm = inner.match(/<query>([\s\S]*?)<\/query>/i);
+          const pm = inner.match(/<(?:filePattern|pattern)>([\s\S]*?)<\/(?:filePattern|pattern)>/i);
+          toolArgs = {
+            query: dsmlParams.query || (qm ? qm[1].trim() : inner.trim()),
+            filePattern: dsmlParams.filePattern || dsmlParams.pattern || (pm ? pm[1].trim() : undefined)
+          };
+        } else if (toolName === 'read_rule') {
+          const rm = inner.match(/<(?:ruleName|name|rule)>([\s\S]*?)<\/(?:ruleName|name|rule)>/i);
+          toolArgs = {
+            ruleName: dsmlParams.ruleName || dsmlParams.name || (rm ? rm[1].trim() : inner.trim())
+          };
+        } else if (toolName === 'ask_user') {
+          const qm = inner.match(/<(?:question|prompt|text|message)>([\s\S]*?)<\/(?:question|prompt|text|message)>/i);
+          toolArgs = {
+            question: dsmlParams.question || dsmlParams.prompt || (qm ? qm[1].trim() : inner.replace(/<[^>]+>/g, '').trim())
+          };
+        }
+      }
+
+      // Check for placeholder / dummy arguments and discard them
+      const isDummyPath = (p: string | undefined): boolean => {
+        if (!p) return true;
+        const norm = p.trim().toLowerCase().replace(/\\/g, '/');
+        return /^(?:путь[\/]|relative[\/]path|path[\/]to|filename\.ext|new_file\.ext|файлу\.ext|file\.ext|\.[\/]file\.ext|test_file\.ext)/i.test(norm) ||
+               norm === 'путь' || norm === 'файлу.ext' || norm === 'file.ext' || norm.includes('путь/к/файлу');
+      };
+
+      const isDummyCommand = (cmd: string | undefined): boolean => {
+        if (!cmd) return true;
+        const norm = cmd.trim().toLowerCase();
+        return /^(?:команда(?:\s+для\s+запуска)?|command_here|python script\.py arg1 arg2|команда\s+запуска|command to run)$/i.test(norm) ||
+               norm.includes('команда для запуска');
+      };
+
+      const isDummyContent = (cnt: string | undefined): boolean => {
+        if (!cnt) return true;
+        const norm = cnt.trim().toLowerCase();
+        return /^(?:полный код нового файла|complete file content here|код нового файла)$/i.test(norm) ||
+               norm.includes('полный код нового файла');
+      };
+
+      // Discard placeholder calls immediately
+      if (toolName === 'write_file' && (isDummyPath(toolArgs.path) || isDummyContent(toolArgs.content))) {
+        return;
+      }
+      if (toolName === 'replace_file_content' && (isDummyPath(toolArgs.path) || !toolArgs.targetContent)) {
+        return;
+      }
+      if (toolName === 'view_file_slice' && isDummyPath(toolArgs.path)) {
+        return;
+      }
+      if (toolName === 'get_diagnostics' && isDummyPath(toolArgs.filePath)) {
+        return;
+      }
+      if (toolName === 'run_terminal_command' && isDummyCommand(toolArgs.command)) {
+        return;
+      }
+
+      // If in Plan Mode and the user EXPLICITLY demanded a plan that is NOT yet confirmed:
+      // Block modifying tools until plan confirmation, but ALLOW read-only inspection commands for exploration.
+      if (session && session.planMode !== false && session.planExplicitlyDemanded && !session.planConfirmed) {
+        if (toolName === 'write_file' || toolName === 'replace_file_content') {
+          return;
+        }
+        if (toolName === 'run_terminal_command' && !isReadOnlyCommand(toolArgs.command)) {
+          return;
+        }
+      }
+
+      toolCalls.push({
+        id: callId,
+        type: 'function',
+        function: {
+          name: toolName,
+          arguments: JSON.stringify(toolArgs)
+        }
+      });
+    };
+
+    // 1. Comprehensive XML Regex matching:
+    // - Standard: <tool_call name="...">...</tool_call> or </call> or </tool> or </function_call>
+    const toolCallRegex = /<(?:tool_call|function_call|tool)\s+[^>]*?name=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)(?:<\/(?:tool_call|function_call|call|tool)>|$)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = toolCallRegex.exec(content)) !== null) {
+      processSingleCall(m[1], m[2]);
+    }
+
+    // Direct tag matching: <create_file>...</create_file>, <write_file>...</write_file>, <replace_file_content>...
+    const directTagRegex = /<(command|create_file|write_file|replace_file_content|edit_file|run_command|run_terminal_command|list_files|read_file|view_file|view_file_slice|get_diagnostics|ask_user)\b[^>]*>([\s\S]*?)(?:<\/\1>|$)/gi;
+    while ((m = directTagRegex.exec(content)) !== null) {
+      processSingleCall(m[1], m[2]);
+    }
+
+    // 2. DSML Format Regex matching:
+    // - Matches <｜｜DSML｜｜ call name="..."> or <||DSML|| invoke name="...">
+    const dsmlRegex = /<[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}\s+(?:call|invoke)\s+name=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)(?:<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}(?:\s*(?:call|invoke))?>|(?=<[|\uFF5C]{1,2}DSML)|$)/gi;
+    while ((m = dsmlRegex.exec(content)) !== null) {
+      processSingleCall(m[1], m[2]);
+    }
+
+    return toolCalls;
+  }
+
+  public async runCompact(callbacks: AgentCallbacks): Promise<void> {
+    const session = this.sessionManager.getCurrentSession();
+    const visibleMessages = (session.messages || []).filter(m => !m.isInternal && !m.id?.startsWith('compact_') && !m.content?.startsWith('[COMPACTED CONTEXT BRIEFING]') && !m.content.startsWith('/compact') && !m.content.startsWith('/сжать'));
+    if (visibleMessages.length === 0) {
+      callbacks.onStatus('Ready');
+      callbacks.onComplete?.('stop');
+      return;
+    }
+
+    callbacks.onStatus('Compacting...');
+    callbacks.onActivityStep?.({
+      type: 'compact',
+      title: 'Compacting'
+    });
+
+    let uncompactedMessages = visibleMessages;
+    if (session.compactedSummary && session.compactedAtMessageId) {
+      const cutIdx = visibleMessages.findIndex(m => m.id === session.compactedAtMessageId);
+      if (cutIdx !== -1) {
+        uncompactedMessages = visibleMessages.slice(cutIdx + 1);
+      }
+    }
+    const messagesToCompact = uncompactedMessages.length > 0 ? uncompactedMessages : visibleMessages;
+
+    const summary = await this.generateCompactSummary(messagesToCompact, session);
+    if (!summary) {
+      callbacks.onActivityStep?.({
+        type: 'compact_done',
+        title: 'Compacted'
+      });
+      callbacks.onError('Не удалось сформировать сжатый контекст.');
+      return;
+    }
+
+    const lastMsgId = messagesToCompact[messagesToCompact.length - 1]?.id || visibleMessages[visibleMessages.length - 1]?.id;
+    this.sessionManager.setCompactedContext(summary, lastMsgId);
+
+    callbacks.onActivityStep?.({
+      type: 'compact_done',
+      title: 'Compacted'
+    });
+
+    // Recalculate tokens
+    const activeProject = this.sessionManager.getActiveProject();
+    const systemPrompt = await this.promptBuilder.buildSystemPrompt(activeProject, {
+      agentMode: session.agentMode !== false,
+      planMode: session.planMode !== false,
+      planConfirmed: Boolean(session.planConfirmed),
+      deadMode: Boolean(session.deadMode)
+    });
+    const toolsForRun = session.agentMode ? TOOL_DEFINITIONS : undefined;
+    const messagesToSend = this.pruneMessagesForRequest(systemPrompt, session.messages, 120, session);
+    let turnUsage = countConversationTokens(messagesToSend, toolsForRun, DEFAULT_CONTEXT_LIMIT);
+    turnUsage.lastCompactTimestamp = session.lastCompactTimestamp;
+    this.sessionManager.updateTokens(turnUsage.totalTokens, turnUsage.promptTokens, turnUsage.completionTokens, turnUsage.userTokens);
+    callbacks.onTokenUsage?.(turnUsage);
+
+    callbacks.onChunk?.('История диалога успешно сжата. Все предыдущие сообщения сохранены в интерфейсе, а в запросы к модели передается компактная сводка состояния.');
+    callbacks.onStatus('Ready');
+    callbacks.onComplete('stop');
+  }
+
+  private async generateCompactSummary(messages: ChatMessage[], session: ChatSession): Promise<string> {
+    const compactSystemPrompt = this.promptBuilder.getModeSnippet('compact_summary') ||
+      `You are the Context Compaction Engine. Distill the conversation into a dense, precise, and actionable state summary. Preserve all file paths, plan tasks, and technical details.`;
+
+    const validMessages = (messages || []).filter(m => !m.isInternal && !m.id?.startsWith('compact_') && !m.content?.startsWith('[COMPACTED CONTEXT BRIEFING]'));
+
+    // Windowing: if message count is large, preserve initial goal messages + recent execution window
+    let messagesToInclude: ChatMessage[] = validMessages;
+    let omittedCount = 0;
+    if (validMessages.length > 30) {
+      const head = validMessages.slice(0, 3);
+      omittedCount = validMessages.length - 28;
+      messagesToInclude = head;
+    }
+
+    let historyTranscript = '';
+    // Dynamic Compacting: we do NOT inject or re-compact previous summary blocks.
+    // Each milestone block summarizes solely the newly executed actions.
+
+    for (let i = 0; i < messagesToInclude.length; i++) {
+      const m = messagesToInclude[i];
+      const role = m.role.toUpperCase();
+      let text = m.content || '';
+
+      // Tighter truncation limits to guarantee staying well under the proxy 131,072 character limit
+      const maxChar = m.role === 'tool' ? 1500 : 3000;
+      if (text.length > maxChar) {
+        text = text.slice(0, Math.floor(maxChar * 0.65)) + '\n...[content truncated for summary]...\n' + text.slice(-Math.floor(maxChar * 0.25));
+      }
+      historyTranscript += `[${role}]:\n${text}\n\n`;
+
+      if (omittedCount > 0 && i === 2) {
+        historyTranscript += `... [${omittedCount} intermediate turns omitted for context compaction] ...\n\n`;
+        const tail = validMessages.slice(-25);
+        for (const tm of tail) {
+          const tRole = tm.role.toUpperCase();
+          let tText = tm.content || '';
+          const tMax = tm.role === 'tool' ? 1500 : 3000;
+          if (tText.length > tMax) {
+            tText = tText.slice(0, Math.floor(tMax * 0.65)) + '\n...[content truncated for summary]...\n' + tText.slice(-Math.floor(tMax * 0.25));
+          }
+          historyTranscript += `[${tRole}]:\n${tText}\n\n`;
+        }
+        break;
+      }
+    }
+
+    const requestMessages: ChatMessage[] = [
+      {
+        id: 'compact_sys',
+        role: 'system',
+        content: compactSystemPrompt,
+        timestamp: 0
+      }
+    ];
+
+    // Safely chunk historyTranscript so no single message exceeds 100,000 chars (well under 131,072 limit)
+    const CHUNK_SIZE = 100000;
+    if (historyTranscript.length <= CHUNK_SIZE) {
+      requestMessages.push({
+        id: 'compact_user',
+        role: 'user',
+        content: `Distill the following conversation history into the structured COMPACTED AGENT CONTEXT format:\n\n${historyTranscript}`,
+        timestamp: Date.now()
+      });
+    } else {
+      let offset = 0;
+      let partIdx = 1;
+      const totalParts = Math.ceil(historyTranscript.length / CHUNK_SIZE);
+      while (offset < historyTranscript.length) {
+        const slice = historyTranscript.slice(offset, offset + CHUNK_SIZE);
+        requestMessages.push({
+          id: `compact_chunk_${partIdx}`,
+          role: 'user',
+          content: `[CONTEXT HISTORY PART ${partIdx}/${totalParts}]:\n${slice}`,
+          timestamp: Date.now()
+        });
+        if (partIdx < totalParts) {
+          requestMessages.push({
+            id: `compact_chunk_ack_${partIdx}`,
+            role: 'assistant',
+            content: `Part ${partIdx}/${totalParts} received. Please provide the remaining context.`,
+            timestamp: Date.now()
+          });
+        }
+        offset += CHUNK_SIZE;
+        partIdx++;
+      }
+      requestMessages.push({
+        id: 'compact_user_final',
+        role: 'user',
+        content: 'All history parts provided above. Now distill the entire history into the structured COMPACTED AGENT CONTEXT format.',
+        timestamp: Date.now()
+      });
+    }
+
+    let summary = '';
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.client.streamChatCompletion(
+          requestMessages,
+          {
+            model: session.model,
+            thinking: false,
+            search: false,
+            deadMode: session.deadMode,
+            agentMode: false
+          },
+          {
+            onChunk: (delta) => {
+              summary += delta;
+            },
+            onReasoningChunk: () => {},
+            onError: (err) => reject(err),
+            onComplete: () => resolve()
+          },
+          this.abortController?.signal
+        );
+      });
+    } catch (err: any) {
+      console.error('[Engine] Failed to generate compact summary:', err);
+      return '';
+    }
+
+    return summary.trim();
+  }
+
+  private async generateGeneralCompactSummary(blocks: string[], session: ChatSession, isUltra: boolean): Promise<string> {
+    const targetTokens = calculateTargetCompactedTokens(isUltra ? ULTRA_COMPACT_THRESHOLD : GENERAL_COMPACT_THRESHOLD);
+    const systemPrompt = isUltra
+      ? `You are the Ultra-Context Ground Truth Engine. Distill the entire cumulative history of the project into an authoritative, dense master technical blueprint. Preserve all exact active file paths, core architecture, data contracts, and immediate pending tasks. Zero fluff.`
+      : `You are the Meta-Compaction Engine. Consolidate the preceding milestone stages into a unified, high-level project archive. Reconcile superseded steps and preserve the current ground-truth code state and architecture. Target size: ~${targetTokens} tokens.`;
+
+    // Join all blocks into a combined narrative
+    const combinedBlocksText = blocks.map((b, idx) => `[MILESTONE ${idx + 1}]:\n${b}`).join('\n\n');
+
+    const requestMessages: ChatMessage[] = [
+      {
+        id: 'meta_sys',
+        role: 'system',
+        content: systemPrompt,
+        timestamp: 0
+      }
+    ];
+
+    // Safely chunk if larger than 100,000 chars so no single message trips the proxy 131k limit
+    const CHUNK_SIZE = 100000;
+    if (combinedBlocksText.length <= CHUNK_SIZE) {
+      requestMessages.push({
+        id: 'meta_user',
+        role: 'user',
+        content: `Consolidate the following milestone stages into a single unified archive:\n\n${combinedBlocksText}`,
+        timestamp: Date.now()
+      });
+    } else {
+      let offset = 0;
+      let part = 1;
+      const totalParts = Math.ceil(combinedBlocksText.length / CHUNK_SIZE);
+      while (offset < combinedBlocksText.length) {
+        const slice = combinedBlocksText.slice(offset, offset + CHUNK_SIZE);
+        requestMessages.push({
+          id: `meta_chunk_${part}`,
+          role: 'user',
+          content: `[ARCHIVE PART ${part}/${totalParts}]:\n${slice}`,
+          timestamp: Date.now()
+        });
+        if (part < totalParts) {
+          requestMessages.push({
+            id: `meta_ack_${part}`,
+            role: 'assistant',
+            content: `Part ${part}/${totalParts} received. Please provide the remaining archive blocks.`,
+            timestamp: Date.now()
+          });
+        }
+        offset += CHUNK_SIZE;
+        part++;
+      }
+      requestMessages.push({
+        id: 'meta_user_final',
+        role: 'user',
+        content: 'All milestone parts provided above. Now produce the final consolidated summary.',
+        timestamp: Date.now()
+      });
+    }
+
+    let summary = '';
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.client.streamChatCompletion(
+          requestMessages,
+          {
+            model: session.model,
+            thinking: false,
+            search: false,
+            deadMode: session.deadMode,
+            agentMode: false
+          },
+          {
+            onChunk: (delta) => {
+              summary += delta;
+            },
+            onReasoningChunk: () => {},
+            onError: (err) => reject(err),
+            onComplete: () => resolve()
+          },
+          this.abortController?.signal
+        );
+      });
+      return summary.trim();
+    } catch (err: any) {
+      logger.log('Engine', 'General compaction failed:', err);
+      return '';
+    }
   }
 }

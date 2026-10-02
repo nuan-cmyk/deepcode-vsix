@@ -1,4 +1,4 @@
-# Guideline: Chunked Code Exploration (Точечное чтение строк)
+# Guideline: Chunked Code Exploration
 
 When investigating or debugging a project, reading entire large files consumes unnecessary tokens and degrades reasoning fidelity. Follow these chunked reading best practices:
 

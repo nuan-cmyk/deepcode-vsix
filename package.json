@@ -1,146 +1,169 @@
 {
-  "name": "deepcode-pro",
-  "displayName": "DeepCode Pro",
-  "description": "Autonomous AI Coding Agent for DeepSeek with Claude Code UX, Surgical Editing, and Self-Healing Diagnostics",
-  "version": "0.1.0",
-  "publisher": "sums001",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/nuan-cmyk/DeepCode-Pro.git"
-  },
-  "engines": {
-    "vscode": "^1.85.0"
-  },
-  "categories": [
-    "AI",
-    "Programming Languages",
-    "Linters"
-  ],
-  "main": "./dist/extension.js",
-  "activationEvents": [
-    "onView:deepseek.agentView"
-  ],
-  "contributes": {
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "deepseek-agent-container",
-          "title": "DeepSeek Code",
-          "icon": "media/icon.svg"
-        }
-      ]
-    },
-    "views": {
-      "deepseek-agent-container": [
-        {
-          "id": "deepseek.agentView",
-          "name": "DeepSeek Agent",
-          "type": "webview"
-        }
-      ]
-    },
-    "commands": [
-      {
-        "command": "deepseek.newChat",
-        "title": "New Chat",
-        "icon": "$(add)"
-      },
-      {
-        "command": "deepseek.history",
-        "title": "Chat History",
-        "icon": "$(history)"
-      },
-      {
-        "command": "deepseek.toggleAutoMode",
-        "title": "DeepSeek: Toggle Auto Mode"
-      },
-      {
-        "command": "deepseek.setApiKey",
-        "title": "DeepSeek: Set API Key / Token"
-      },
-      {
-        "command": "deepseek.setBaseUrl",
-        "title": "DeepSeek: Set Server Base URL"
-      },
-      {
-        "command": "deepseek.focus",
-        "title": "DeepSeek: Focus Agent Composer"
-      }
-    ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "deepseek.history",
-          "when": "view == deepseek.agentView",
-          "group": "navigation@1"
-        },
-        {
-          "command": "deepseek.newChat",
-          "when": "view == deepseek.agentView",
-          "group": "navigation@2"
-        }
-      ]
-    },
-    "keybindings": [
-      {
-        "command": "deepseek.focus",
-        "key": "ctrl+escape",
-        "mac": "cmd+escape"
-      },
-      {
-        "command": "deepseek.toggleAutoMode",
-        "key": "shift+tab",
-        "when": "deepseekViewFocused"
-      }
-    ],
-    "configuration": {
-      "title": "DeepSeek Agent",
-      "properties": {
-        "deepseek.baseUrl": {
-          "type": "string",
-          "default": "https://api.thenck4.ru/v1",
-          "description": "Base URL for DeepSeek OpenAI-compatible API"
-        },
-        "deepseek.model": {
-          "type": "string",
-          "default": "deepseek-chat",
-          "enum": [
-            "deepseek-chat",
-            "deepseek-reasoner"
-          ],
-          "description": "Default model to use for agent interactions"
-        },
-        "deepseek.autoMode": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically approve file modifications and diagnostic verification"
-        },
-        "deepseek.maxSelfHealingRetries": {
-          "type": "number",
-          "default": 3,
-          "description": "Maximum self-healing attempts when errors are detected"
-        },
-        "deepseek.enableThinking": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show collapsible thinking/reasoning process (R1)"
-        },
-        "deepseek.enableSearch": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable web search integration if backend supports it"
-        }
-      }
-    }
-  },
-  "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
-  },
-  "devDependencies": {
-    "@types/node": "^20.11.0",
-    "@types/vscode": "^1.85.0",
-    "typescript": "^5.3.3"
-  }
+	"name": "deepcode",
+	"displayName": "DeepCode",
+	"description": "Autonomous AI Coding Agent with Claude Code UX, Surgical Editing, and Self-Healing Diagnostics",
+	"version": "1.24.6",
+	"publisher": "sums001",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/sums001/Deepseek-API.git"
+	},
+	"engines": {
+		"vscode": "^1.85.0"
+	},
+	"categories": [
+		"AI",
+		"Programming Languages",
+		"Linters"
+	],
+	"main": "./dist/extension.js",
+	"activationEvents": [
+		"onView:deepseek.agentView"
+	],
+	"contributes": {
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "deepseek-agent-container",
+					"title": "DeepCode",
+					"icon": "media/icon.svg"
+				}
+			]
+		},
+		"views": {
+			"deepseek-agent-container": [
+				{
+					"id": "deepseek.agentView",
+					"name": "DeepCode",
+					"type": "webview"
+				}
+			]
+		},
+		"commands": [
+			{
+				"command": "deepseek.newChat",
+				"title": "New Chat",
+				"icon": "$(add)"
+			},
+			{
+				"command": "deepseek.history",
+				"title": "Chat History",
+				"icon": "$(history)"
+			},
+			{
+				"command": "deepseek.showLogs",
+				"title": "Show Logs",
+				"icon": "$(output)"
+			},
+			{
+				"command": "deepseek.openSettings",
+				"title": "Settings",
+				"icon": {
+					"light": "media/settings-light.svg",
+					"dark": "media/settings-dark.svg"
+				}
+			},
+			{
+				"command": "deepseek.toggleAutoMode",
+				"title": "DeepCode: Toggle Auto Mode"
+			},
+			{
+				"command": "deepseek.setApiKey",
+				"title": "DeepCode: Set API Key / Token"
+			},
+			{
+				"command": "deepseek.setBaseUrl",
+				"title": "DeepCode: Set Server Base URL"
+			},
+			{
+				"command": "deepseek.focus",
+				"title": "DeepCode: Focus Agent Composer"
+			}
+		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "deepseek.history",
+					"when": "view == deepseek.agentView",
+					"group": "navigation@1"
+				},
+				{
+					"command": "deepseek.openSettings",
+					"when": "view == deepseek.agentView",
+					"group": "navigation@2"
+				},
+				{
+					"command": "deepseek.newChat",
+					"when": "view == deepseek.agentView",
+					"group": "navigation@3"
+				}
+			]
+		},
+		"keybindings": [
+			{
+				"command": "deepseek.focus",
+				"key": "ctrl+escape",
+				"mac": "cmd+escape"
+			},
+			{
+				"command": "deepseek.toggleAutoMode",
+				"key": "shift+tab",
+				"when": "deepseekViewFocused"
+			}
+		],
+		"configuration": {
+			"title": "DeepCode",
+			"properties": {
+				"deepseek.baseUrl": {
+					"type": "string",
+					"default": "https://api.thenck4.ru/v1",
+					"description": "Base URL for DeepSeek OpenAI-compatible API"
+				},
+				"deepseek.model": {
+					"type": "string",
+					"default": "deepseek-chat",
+					"enum": [
+						"deepseek-chat",
+						"deepseek-reasoner"
+					],
+					"description": "Default model to use for agent interactions"
+				},
+				"deepseek.autoMode": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically approve file modifications and diagnostic verification"
+				},
+				"deepseek.maxSelfHealingRetries": {
+					"type": "number",
+					"default": 3,
+					"description": "Maximum self-healing attempts when errors are detected"
+				},
+				"deepseek.enableThinking": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show collapsible thinking/reasoning process (R1)"
+				},
+				"deepseek.enableSearch": {
+					"type": "boolean",
+					"default": false,
+					"description": "Enable web search integration if backend supports it"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/node": "^20.11.0",
+		"@types/vscode": "^1.85.0",
+		"typescript": "^5.3.3"
+	},
+	"__metadata": {
+		"installedTimestamp": 1790621840447,
+		"targetPlatform": "undefined",
+		"size": 456372
+	}
 }
