@@ -47,6 +47,7 @@ export interface DefaultChatSettings {
   sandboxMode?: SandboxMode;
   debugMode?: boolean;
   autoOpenModifiedFiles?: boolean;
+  autoUpdate?: boolean;
   pacingDelayMs?: number;
   requestDelayMs?: number;
   connectTimeoutSec?: number;
