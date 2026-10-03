@@ -25,6 +25,7 @@ export class SessionManager {
     sandboxMode: 'local',
     debugMode: false,
     autoOpenModifiedFiles: false,
+    autoUpdate: false,
     pacingDelayMs: 1500,
     requestDelayMs: 0,
     connectTimeoutSec: 75,
