@@ -7,12 +7,6 @@ export interface ToolCall {
   };
 }
 
-export interface ToolResult {
-  toolCallId: string;
-  name: string;
-  output: string;
-  error?: boolean;
-}
 
 export interface ChatMessage {
   id: string;
@@ -52,6 +46,7 @@ export interface DefaultChatSettings {
   planMode?: boolean;
   sandboxMode?: SandboxMode;
   debugMode?: boolean;
+  autoOpenModifiedFiles?: boolean;
   pacingDelayMs?: number;
   requestDelayMs?: number;
   connectTimeoutSec?: number;
@@ -83,6 +78,7 @@ export interface ChatSession {
   planExplicitlyDemanded?: boolean;
   sandboxMode?: SandboxMode;
   debugMode?: boolean;
+  autoOpenModifiedFiles?: boolean;
   allowedCommands?: string[];
   conversationId?: string;
   totalTokens: number;
@@ -136,12 +132,3 @@ export interface AgentActivityStep {
   reason?: string;
 }
 
-export type AgentEvent =
-  | { type: 'chunk'; content: string }
-  | { type: 'reasoning_chunk'; content: string }
-  | { type: 'tool_call_start'; name: string; args: any; callId: string }
-  | { type: 'tool_call_end'; name: string; result: string; error?: boolean; callId: string }
-  | { type: 'status'; text: string }
-  | { type: 'finish'; finishReason: string; totalTokens?: number }
-  | { type: 'token_usage'; promptTokens: number; completionTokens: number; totalTokens: number; maxTokens: number; percent: number }
-  | { type: 'error'; message: string };

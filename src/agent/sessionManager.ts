@@ -24,6 +24,7 @@ export class SessionManager {
     planMode: true,
     sandboxMode: 'local',
     debugMode: false,
+    autoOpenModifiedFiles: false,
     pacingDelayMs: 1500,
     requestDelayMs: 0,
     connectTimeoutSec: 75,
@@ -326,22 +327,10 @@ export class SessionManager {
     return list;
   }
 
-  public getAllSessions(): ChatSession[] {
-    return Array.from(this.sessions.values()).sort((a, b) => b.updatedAt - a.updatedAt);
-  }
-
   public renameProject(id: string, newName: string): void {
     const p = this.projects.get(id);
     if (p) {
       p.name = newName.trim();
-      this.saveToStorage();
-    }
-  }
-
-  public updateProjectPath(id: string, newPath: string): void {
-    const p = this.projects.get(id);
-    if (p) {
-      p.path = newPath.trim();
       this.saveToStorage();
     }
   }
@@ -355,8 +344,10 @@ export class SessionManager {
     this.defaultSettings = { ...this.defaultSettings, ...defaults };
     await this.context.globalState.update(DEFAULT_SETTINGS_KEY, JSON.stringify(this.defaultSettings));
     const session = this.getCurrentSession();
-    if (session && defaults.sandboxMode) {
-      session.sandboxMode = defaults.sandboxMode;
+    if (session) {
+      if (defaults.sandboxMode) session.sandboxMode = defaults.sandboxMode;
+      if (defaults.autoOpenModifiedFiles !== undefined) session.autoOpenModifiedFiles = defaults.autoOpenModifiedFiles;
+      if (defaults.debugMode !== undefined) session.debugMode = defaults.debugMode;
       this.saveToStorage();
     }
   }
@@ -381,6 +372,7 @@ export class SessionManager {
       planMode: this.defaultSettings.planMode ?? true,
       sandboxMode: this.defaultSettings.sandboxMode ?? 'local',
       debugMode: this.defaultSettings.debugMode ?? false,
+      autoOpenModifiedFiles: this.defaultSettings.autoOpenModifiedFiles ?? false,
       allowedCommands: [],
       planConfirmed: false,
       planExplicitlyDemanded: false,
@@ -537,18 +529,6 @@ export class SessionManager {
     this.saveToStorage();
   }
 
-  public addTokensSpent(spent: number): void {
-    const session = this.getCurrentSession();
-    session.cumulativeTokensSpent = (session.cumulativeTokensSpent || 0) + spent;
-    this.saveToStorage();
-  }
-
-  public recordCompactTimestamp(): void {
-    const session = this.getCurrentSession();
-    session.lastCompactTimestamp = Date.now();
-    this.saveToStorage();
-  }
-
   public setCompactedContext(summary: string, atMessageId?: string): void {
     const session = this.getCurrentSession();
     
@@ -605,14 +585,6 @@ export class SessionManager {
   public recordRawTokensProcessed(tokens: number): void {
     const session = this.getCurrentSession();
     session.rawTokensProcessedTotal = (session.rawTokensProcessedTotal || 0) + tokens;
-    this.saveToStorage();
-  }
-
-  public applyCompaction(compactedMessage: ChatMessage, newConversationId?: string): void {
-    const session = this.getCurrentSession();
-    session.messages = [compactedMessage];
-    session.conversationId = newConversationId;
-    session.lastCompactTimestamp = Date.now();
     this.saveToStorage();
   }
 }

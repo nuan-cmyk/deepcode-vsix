@@ -114,6 +114,7 @@ const I18N = {
     contextWindow: 'Context Window',
     tokensUnit: 'tokens',
     defDebugModeLabel: 'Debug Mode',
+    defAutoOpenFileLabel: 'Auto-open modified files',
     debugInfoTitle: 'Debug Info',
     errorCodeLabel: 'Code:',
     copyRawError: 'Copy Error',
@@ -236,6 +237,7 @@ const I18N = {
     contextWindow: 'Контекст',
     tokensUnit: 'токенов',
     defDebugModeLabel: 'Режим отладки',
+    defAutoOpenFileLabel: 'Автоматически открывать измененные файлы',
     debugInfoTitle: 'Отладочная информация',
     errorCodeLabel: 'Код:',
     copyRawError: 'Копировать ошибку',
@@ -395,6 +397,7 @@ function applyLanguage(lang) {
     ['lblDiagSec', 'lblDiagSec'],
     ['lblDefSandbox', 'lblDefSandbox'],
     ['lblDefDebugMode', 'defDebugModeLabel'],
+    ['lblDefAutoOpenFile', 'defAutoOpenFileLabel'],
     ['lblTimeoutsSec', 'lblTimeoutsSec'],
     ['lblRequestDelay', 'lblRequestDelay'],
     ['lblPacingDelay', 'lblPacingDelay'],
@@ -617,6 +620,7 @@ const defSearch = document.getElementById('defSearch');
 const defPlanMode = document.getElementById('defPlanMode');
 const defSandboxMode = document.getElementById('defSandboxMode');
 const defDebugMode = document.getElementById('defDebugMode');
+const defAutoOpenFile = document.getElementById('defAutoOpenFile');
 const devPacingDelayInput = document.getElementById('devPacingDelayInput');
 const devRequestDelayInput = document.getElementById('devRequestDelayInput');
 const devConnectTimeoutInput = document.getElementById('devConnectTimeoutInput');
@@ -656,6 +660,12 @@ function applyDebugModeUI() {
   });
   document.querySelectorAll('.internal-debug-row').forEach(el => {
     el.style.display = modeStates.debugMode ? 'block' : 'none';
+  });
+  document.querySelectorAll('.working-api-delay').forEach(el => {
+    if (!modeStates.debugMode) el.style.display = 'none';
+  });
+  document.querySelectorAll('.cascade-delay-item').forEach(el => {
+    if (!modeStates.debugMode) el.style.display = 'none';
   });
 }
 let currentAssistantMsgEl = null;
@@ -714,41 +724,70 @@ function updateSendButtonState() {
   }
 }
 
+function cleanupActiveSpinners() {
+  // 1. Unconditionally terminate any command spinners and running classes anywhere in DOM
+  document.querySelectorAll('.cascade-cmd-item.running').forEach(cmd => {
+    cmd.classList.remove('running');
+    const sp = cmd.querySelector('.cmd-spinner');
+    if (sp) sp.style.setProperty('display', 'none', 'important');
+  });
+  document.querySelectorAll('.cmd-spinner').forEach(sp => {
+    sp.style.setProperty('display', 'none', 'important');
+  });
+
+  // 2. Unconditionally finalize any active thinking accordions and hide spinning dots
+  document.querySelectorAll('.thinking-accordion.active').forEach(acc => {
+    acc.classList.remove('active');
+    acc.classList.remove('open');
+    const dot = acc.querySelector('.thinking-dot, .debug-dot');
+    if (dot) dot.style.display = 'none';
+    const vp = acc.querySelector('.thinking-stream-viewport');
+    if (vp) vp.remove();
+  });
+  document.querySelectorAll('.thinking-dot, .debug-dot').forEach(dot => {
+    dot.style.display = 'none';
+  });
+  finishThinking();
+  finishDebugTrace();
+
+  // 3. Finalize all non-done working blocks
+  document.querySelectorAll('.working-block:not(.done)').forEach(wb => {
+    wb.classList.add('done');
+    const sp = wb.querySelector('.working-spinner');
+    if (sp) sp.style.display = 'none';
+    const timeEl = wb.querySelector('.working-time');
+    if (timeEl && timeEl.style.display === 'none') {
+      const asstEl = wb.closest('.assistant-message');
+      const start = asstEl?._startTime || executionStartTime || Date.now();
+      const elapsedSec = Math.max(1, Math.round((Date.now() - start) / 1000));
+      timeEl.textContent = formatDuration(elapsedSec);
+      timeEl.style.display = 'inline-block';
+    }
+    const title = wb.querySelector('.working-title');
+    if (title && title.textContent === t('workingTitle')) {
+      title.textContent = t('workedTitle') || 'Worked';
+    }
+  });
+
+  document.querySelectorAll('.working-spinner').forEach(sp => {
+    sp.style.display = 'none';
+  });
+  document.querySelectorAll('.working-pill').forEach(pill => pill.remove());
+}
+
 function handleStop() {
   if (!isGenerating) return;
   isGenerating = false;
   updateSendButtonState();
 
-  // Cleanly finalize working block without displaying stopped error pills
-  if (currentAssistantMsgEl) {
-    const pill = currentAssistantMsgEl.querySelector('.working-pill');
-    if (pill) pill.remove();
-    const wb = currentAssistantMsgEl.querySelector('.working-block');
-    if (wb) {
-      wb.classList.add('done');
-      const spinner = wb.querySelector('.working-spinner');
-      if (spinner) spinner.style.display = 'none';
-      const start = currentAssistantMsgEl._startTime || executionStartTime || Date.now();
-      const elapsedSec = Math.max(1, Math.round((Date.now() - start) / 1000));
-      const timeStr = formatDuration(elapsedSec);
-      const timeEl = wb.querySelector('.working-time');
-      if (timeEl) {
-        timeEl.textContent = timeStr;
-        timeEl.style.display = 'inline-block';
-      }
-      const title = wb.querySelector('.working-title');
-      if (title) {
-        title.textContent = t('workedTitle') || 'Worked';
-      }
-    }
-  }
+  // Cleanly finalize working blocks, command spinners, and thinking accordions immediately on client
+  cleanupActiveSpinners();
 
   if (currentAssistantMsgEl && turnModifiedFiles.size > 0 && currentAssistantMsgEl.dataset.hasModifiedFiles === 'true') {
     renderReviewStatBar(currentAssistantMsgEl, turnModifiedFiles);
   }
   turnModifiedFiles.clear();
 
-  finishThinking();
   vscode.postMessage({ command: 'stop' });
 }
 
@@ -1278,6 +1317,7 @@ function saveCredentials(key, url, model) {
     planMode: defPlanMode ? defPlanMode.checked : true,
     sandboxMode: defSandboxMode ? defSandboxMode.value : 'local',
     debugMode: defDebugMode ? defDebugMode.checked : false,
+    autoOpenModifiedFiles: defAutoOpenFile ? defAutoOpenFile.checked : false,
     pacingDelayMs: devPacingDelayInput ? (parseInt(devPacingDelayInput.value, 10) || 1500) : 1500,
     requestDelayMs: devRequestDelayInput ? (parseInt(devRequestDelayInput.value, 10) || 0) : 0,
     connectTimeoutSec: devConnectTimeoutInput ? (parseInt(devConnectTimeoutInput.value, 10) || 75) : 75,
@@ -1703,6 +1743,7 @@ function ensureWorkingBlock(asstEl) {
           <span class="working-title">${t('workingTitle')}</span>
           <span class="working-spinner"></span>
           <span class="working-time" style="display: none;"></span>
+          <span class="working-api-delay" style="display: none;"></span>
         </div>
         <span class="working-chevron">${LUCIDE.chevron}</span>
       </div>
@@ -1735,6 +1776,69 @@ function cleanTerminalOutput(raw) {
   cleaned = cleaned.replace(/^STDOUT:\s*\r?\n*/gim, '');
   cleaned = cleaned.replace(/^STDERR:\s*\r?\n*/gim, '');
   return cleaned.trim();
+}
+
+function stopCmdItemRunning(cmdWrapper, exitCode, output, error) {
+  if (!cmdWrapper) return;
+  cmdWrapper.classList.remove('running');
+  const spinner = cmdWrapper.querySelector('.cmd-spinner');
+  if (spinner) {
+    spinner.style.setProperty('display', 'none', 'important');
+  }
+
+  const isErr = (exitCode !== undefined && exitCode !== 0) || Boolean(error);
+  const errIcon = cmdWrapper.querySelector('.cascade-error-icon');
+  if (errIcon) errIcon.style.display = isErr ? 'inline-flex' : 'none';
+
+  if (output !== undefined && output !== null && output !== '') {
+    const cleanOut = cleanTerminalOutput(output);
+    const outPre = cmdWrapper.querySelector('.cascade-terminal-output');
+    if (outPre) {
+      outPre.textContent = cleanOut;
+      outPre.style.display = cleanOut ? 'block' : 'none';
+      if (isErr) {
+        outPre.classList.add('has-error');
+      } else {
+        outPre.classList.remove('has-error');
+      }
+    }
+  }
+}
+
+function stopAllRunningCommands(scopeEl) {
+  const root = scopeEl || document;
+  root.querySelectorAll('.cascade-cmd-item.running').forEach(cmd => {
+    stopCmdItemRunning(cmd);
+  });
+  root.querySelectorAll('.cmd-spinner').forEach(sp => {
+    sp.style.setProperty('display', 'none', 'important');
+  });
+}
+
+function findCommandItem(scopeEl, stepId, command) {
+  const root = scopeEl || document;
+  if (stepId) {
+    const byId = root.querySelector(`.cascade-cmd-item[data-cmd-id="${stepId}"]`) ||
+                 document.querySelector(`.cascade-cmd-item[data-cmd-id="${stepId}"]`);
+    if (byId) return byId;
+  }
+  const allCmds = Array.from(root.querySelectorAll('.cascade-cmd-item'));
+  if (command) {
+    const clean = command.trim();
+    // 1. Prefer currently running item that matches command
+    const runningMatch = allCmds.find(el => el.classList.contains('running') &&
+      ((el.dataset.cmdCode || '').trim() === clean || (el.querySelector('.cascade-cmd-code')?.textContent || '').trim() === clean));
+    if (runningMatch) return runningMatch;
+
+    // 2. Any item matching command
+    const anyMatch = allCmds.find(el =>
+      (el.dataset.cmdCode || '').trim() === clean || (el.querySelector('.cascade-cmd-code')?.textContent || '').trim() === clean);
+    if (anyMatch) return anyMatch;
+  }
+  // 3. Fallback: most recent running command item
+  const running = allCmds.filter(el => el.classList.contains('running'));
+  if (running.length > 0) return running[running.length - 1];
+  return null;
 }
 
 function createCmdItem(step) {
@@ -1792,7 +1896,35 @@ function createCmdItem(step) {
 }
 
 function finishThinking() {
-  if (!currentThinkingAccordion) return;
+  document.querySelectorAll('.thinking-accordion.active').forEach(acc => {
+    acc.classList.remove('active');
+    acc.classList.remove('open');
+    const dot = acc.querySelector('.thinking-dot, .debug-dot');
+    if (dot) dot.style.display = 'none';
+    const vp = acc.querySelector('.thinking-stream-viewport');
+    if (vp) vp.remove();
+    const content = acc.querySelector('.thinking-content');
+    if (content && !content.textContent.trim()) {
+      acc.remove();
+    }
+  });
+
+  if (!currentThinkingAccordion) {
+    document.querySelectorAll('.thinking-dot, .debug-dot').forEach(dot => {
+      dot.style.display = 'none';
+    });
+    return;
+  }
+
+  const content = currentThinkingAccordion.querySelector('.thinking-content');
+  if (content && !content.textContent.trim()) {
+    currentThinkingAccordion.remove();
+    currentThinkingAccordion = null;
+    currentThinkingContentEl = null;
+    thinkingStartTime = null;
+    return;
+  }
+
   const duration = thinkingStartTime ? Math.max(1, Math.round((Date.now() - thinkingStartTime) / 1000)) : 1;
   const title = currentThinkingAccordion.querySelector('.thinking-title');
   if (title) {
@@ -1821,6 +1953,8 @@ function finishThinking() {
   currentThinkingAccordion.classList.remove('active');
   // Collapse by default so user is not overwhelmed, but can click to open anytime
   currentThinkingAccordion.classList.remove('open');
+  const dot = currentThinkingAccordion.querySelector('.thinking-dot, .debug-dot');
+  if (dot) dot.style.display = 'none';
 
   currentThinkingAccordion = null;
   currentThinkingContentEl = null;
@@ -1944,6 +2078,13 @@ function finishDebugTrace() {
   currentDebugTraceType = 'trace';
 }
 
+
+function dismissThinkingOnUnstuck(feedEl) {
+  // Finish any active in-flight thinking accordion so its content is preserved and collapsed.
+  // Never delete past valid thought blocks!
+  finishThinking();
+}
+
 function finishUnstuck() {
   finishDebugTrace();
 }
@@ -1986,7 +2127,7 @@ function getUnstuckText(step) {
 
 function renderUnstuckAccordion(feedEl, step) {
   if (!feedEl) return;
-  finishThinking();
+  dismissThinkingOnUnstuck(feedEl);
 
   const accordion = ensureDebugTraceAccordion(feedEl, 'unstuck');
   if (!accordion) return;
@@ -2590,6 +2731,7 @@ window.addEventListener('message', (event) => {
           if (defPlanMode) defPlanMode.checked = msg.defaults.planMode !== false;
           if (defSandboxMode) defSandboxMode.value = msg.defaults.sandboxMode || 'local';
           if (defDebugMode) defDebugMode.checked = Boolean(msg.defaults.debugMode);
+          if (defAutoOpenFile) defAutoOpenFile.checked = Boolean(msg.defaults.autoOpenModifiedFiles);
           if (devPacingDelayInput && msg.defaults.pacingDelayMs !== undefined) devPacingDelayInput.value = msg.defaults.pacingDelayMs;
           if (devRequestDelayInput && msg.defaults.requestDelayMs !== undefined) devRequestDelayInput.value = msg.defaults.requestDelayMs;
           if (devConnectTimeoutInput && msg.defaults.connectTimeoutSec !== undefined) devConnectTimeoutInput.value = msg.defaults.connectTimeoutSec;
@@ -2643,6 +2785,7 @@ window.addEventListener('message', (event) => {
         if (defPlanMode) defPlanMode.checked = msg.defaults.planMode !== false;
         if (defSandboxMode) defSandboxMode.value = msg.defaults.sandboxMode || 'local';
         if (defDebugMode) defDebugMode.checked = Boolean(msg.defaults.debugMode);
+        if (defAutoOpenFile) defAutoOpenFile.checked = Boolean(msg.defaults.autoOpenModifiedFiles);
         if (devPacingDelayInput && msg.defaults.pacingDelayMs !== undefined) devPacingDelayInput.value = msg.defaults.pacingDelayMs;
         if (devRequestDelayInput && msg.defaults.requestDelayMs !== undefined) devRequestDelayInput.value = msg.defaults.requestDelayMs;
         if (devConnectTimeoutInput && msg.defaults.connectTimeoutSec !== undefined) devConnectTimeoutInput.value = msg.defaults.connectTimeoutSec;
@@ -3004,6 +3147,8 @@ window.addEventListener('message', (event) => {
       if (wbSpinner) wbSpinner.style.display = 'inline-block';
       const wbTime = wb.querySelector('.working-time');
       if (wbTime) wbTime.style.display = 'none';
+      const wbDelay = wb.querySelector('.working-api-delay');
+      if (wbDelay) wbDelay.style.display = 'none';
 
       if (currentAssistantMsgEl) {
         currentAssistantMsgEl._rawStream = '';
@@ -3092,7 +3237,12 @@ window.addEventListener('message', (event) => {
 
     case 'activity_step': {
       if (!isGenerating) break;
-      finishThinking();
+      const step = msg.step;
+      if (step && step.type === 'unstuck') {
+        dismissThinkingOnUnstuck();
+      } else {
+        finishThinking();
+      }
       const asstEl = ensureAssistantMessage();
       const workingBlock = ensureWorkingBlock(asstEl);
       workingBlock.classList.remove('done');
@@ -3107,8 +3257,6 @@ window.addEventListener('message', (event) => {
       if (wbTime) wbTime.style.display = 'none';
       const feedEl = workingBlock.querySelector('.activity-feed');
 
-      const step = msg.step;
-
       if (step.type !== 'unstuck') {
         finishDebugTrace();
         finishUnstuck();
@@ -3116,6 +3264,7 @@ window.addEventListener('message', (event) => {
       }
 
       if (step.type === 'create') {
+        stopAllRunningCommands(workingBlock);
         const itemEl = document.createElement('div');
         itemEl.className = 'cascade-step-line clickable';
         const fileName = step.path ? step.path.split(/[\\/]/).pop() : 'file';
@@ -3134,6 +3283,7 @@ window.addEventListener('message', (event) => {
         }
         feedEl.appendChild(itemEl);
       } else if (step.type === 'edit') {
+        stopAllRunningCommands(workingBlock);
         const itemEl = document.createElement('div');
         itemEl.className = 'cascade-step-line clickable';
         const fileName = step.path ? step.path.split(/[\\/]/).pop() : 'file';
@@ -3153,6 +3303,7 @@ window.addEventListener('message', (event) => {
         }
         feedEl.appendChild(itemEl);
       } else if (step.type === 'diagnostics') {
+        stopAllRunningCommands(workingBlock);
         const itemEl = document.createElement('div');
         itemEl.className = 'cascade-step-line clickable';
         const fileName = step.path ? step.path.split(/[\\/]/).pop() : 'workspace';
@@ -3169,33 +3320,20 @@ window.addEventListener('message', (event) => {
         }
         feedEl.appendChild(itemEl);
       } else if (step.type === 'command') {
-        const existingCmd = (step.id && feedEl.querySelector(`.cascade-cmd-item[data-cmd-id="${step.id}"]`)) ||
-                            (step.status !== 'running' && feedEl.querySelector(`.cascade-cmd-item.running[data-cmd-code="${escapeHtml(step.command || '')}"]`));
+        const existingCmd = findCommandItem(feedEl, step.id, step.command);
 
         if (existingCmd && step.status !== 'running') {
-          existingCmd.classList.remove('running');
-          const spinner = existingCmd.querySelector('.cmd-spinner');
-          if (spinner) spinner.style.display = 'none';
-
-          const isErr = (step.exitCode !== undefined && step.exitCode !== 0) || Boolean(step.error);
-          const errIcon = existingCmd.querySelector('.cascade-error-icon');
-          if (errIcon) errIcon.style.display = isErr ? 'inline-flex' : 'none';
-
-          const cleanOut = cleanTerminalOutput(step.output);
-          const outPre = existingCmd.querySelector('.cascade-terminal-output');
-          if (outPre) {
-            outPre.textContent = cleanOut;
-            outPre.style.display = cleanOut ? 'block' : 'none';
-            if (isErr) {
-              outPre.classList.add('has-error');
-            } else {
-              outPre.classList.remove('has-error');
-            }
-          }
+          stopCmdItemRunning(existingCmd, step.exitCode, step.output, step.error);
+          stopAllRunningCommands(workingBlock);
           scrollToBottom();
           break;
         }
 
+        if (step.status !== 'running') {
+          stopAllRunningCommands(workingBlock);
+        }
+
+        stopAllRunningCommands(workingBlock);
         const cmdItem = createCmdItem(step);
         const lastEl = feedEl.lastElementChild;
         let cmdGroup = (lastEl && lastEl.classList.contains('command-group')) ? lastEl : null;
@@ -3405,6 +3543,13 @@ window.addEventListener('message', (event) => {
         });
         const label = decision === 'run_once' ? 'Run once' : decision === 'always_allow' ? 'Always allowed' : 'Don\'t run';
         actionsDiv.innerHTML = `<span class="perm-resolved-status">Decision: ${label}</span>`;
+        if (decision === 'deny') {
+          const relatedCmd = findCommandItem(feedEl, null, msg.command);
+          if (relatedCmd) {
+            stopCmdItemRunning(relatedCmd, 1, 'Command rejected by user', true);
+          }
+          stopAllRunningCommands(workingBlock);
+        }
       };
 
       card.querySelector('.perm-btn-run').addEventListener('click', () => respond('run_once'));
@@ -3417,8 +3562,30 @@ window.addEventListener('message', (event) => {
     }
 
     case 'task_start':
-    case 'task_end':
       break;
+
+    case 'task_end': {
+      // Unconditionally terminate the running state of this command on client
+      let matched = false;
+      if (msg.taskId) {
+        document.querySelectorAll(`.cascade-cmd-item[data-cmd-id="${msg.taskId}"]`).forEach(cmd => {
+          stopCmdItemRunning(cmd, msg.exitCode, msg.output);
+          matched = true;
+        });
+      }
+      if (msg.command) {
+        const cleanCmd = msg.command.trim();
+        document.querySelectorAll('.cascade-cmd-item.running').forEach(cmd => {
+          if ((cmd.dataset.cmdCode || '').trim() === cleanCmd || (cmd.querySelector('.cascade-cmd-code')?.textContent || '').trim() === cleanCmd) {
+            stopCmdItemRunning(cmd, msg.exitCode, msg.output);
+            matched = true;
+          }
+        });
+      }
+      // Unconditionally stop any remaining running command spinners anywhere in DOM
+      stopAllRunningCommands();
+      break;
+    }
 
     case 'task_killed': {
       const card = document.querySelector('.agent-tool-card:has(.kill-task-btn)') || document.getElementById(`task_${msg.taskId}`);
@@ -3489,6 +3656,67 @@ window.addEventListener('message', (event) => {
       break;
     }
 
+    case 'api_delay': {
+      if (!modeStates.debugMode) break;
+      const asstEl = ensureAssistantMessage();
+      const wb = ensureWorkingBlock(asstEl);
+      wb.classList.remove('done');
+      wb.classList.add('open');
+      const wbHeader = wb.querySelector('.working-header');
+      if (wbHeader) wbHeader.style.display = 'flex';
+      const wbSpinner = wb.querySelector('.working-spinner');
+      if (wbSpinner) wbSpinner.style.display = 'inline-block';
+      const wbTime = wb.querySelector('.working-time');
+      if (wbTime) wbTime.style.display = 'none';
+
+      const delayBadge = wb.querySelector('.working-api-delay');
+      const feedEl = wb.querySelector('.activity-feed');
+
+      if (msg.remainingMs > 0) {
+        const secStr = (msg.remainingMs / 1000).toFixed(1);
+        const reasonStr = msg.reason || 'pacing';
+        if (delayBadge) {
+          delayBadge.textContent = `⏱️ API delay: ${secStr}s (${reasonStr})`;
+          delayBadge.style.display = 'inline-flex';
+        }
+
+        if (feedEl) {
+          let delayItem = feedEl.querySelector('.cascade-delay-item');
+          if (!delayItem) {
+            delayItem = document.createElement('div');
+            delayItem.className = 'cascade-step-line cascade-delay-item';
+            feedEl.appendChild(delayItem);
+          }
+          delayItem.innerHTML = `
+            <span class="cascade-action-label" style="color:#38bdf8; font-weight:600;">API Delay</span>
+            <span style="color:#f8fafc; font-family:var(--vscode-editor-font-family, monospace); font-weight:600;">${secStr}s</span>
+            <span style="color:#94a3b8; font-size:10.5px;">(${escapeHtml(reasonStr)})</span>
+          `;
+        }
+      } else {
+        if (delayBadge) {
+          delayBadge.textContent = `⚡ Sending request...`;
+          setTimeout(() => {
+            if (delayBadge) delayBadge.style.display = 'none';
+          }, 800);
+        }
+        if (feedEl) {
+          const delayItem = feedEl.querySelector('.cascade-delay-item');
+          if (delayItem) {
+            delayItem.innerHTML = `
+              <span class="cascade-action-label" style="color:#4ade80; font-weight:600;">API Request</span>
+              <span style="color:#94a3b8; font-size:10.5px;">Dispatched</span>
+            `;
+            setTimeout(() => {
+              if (delayItem && delayItem.parentNode) delayItem.remove();
+            }, 1200);
+          }
+        }
+      }
+      scrollToBottom();
+      break;
+    }
+
     case 'status': {
       // Remove any stray working-pill from assistant message DOM
       if (currentAssistantMsgEl) {
@@ -3501,8 +3729,12 @@ window.addEventListener('message', (event) => {
     case 'finish':
       isGenerating = false;
       updateSendButtonState();
+      cleanupActiveSpinners();
       finishThinking();
       finishDebugTrace();
+
+      document.querySelectorAll('.working-api-delay').forEach(el => el.style.display = 'none');
+      document.querySelectorAll('.cascade-delay-item').forEach(el => el.remove());
 
       document.querySelectorAll('.command-permission-card').forEach(card => {
         const actionsDiv = card.querySelector('.perm-actions');
@@ -3609,6 +3841,7 @@ window.addEventListener('message', (event) => {
     case 'error': {
       isGenerating = false;
       updateSendButtonState();
+      cleanupActiveSpinners();
       finishThinking();
       finishDebugTrace();
 

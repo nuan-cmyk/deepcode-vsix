@@ -584,6 +584,9 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
         onStatus: (status) => {
           this.view?.webview.postMessage({ type: 'status', text: status });
         },
+        onApiDelay: (remainingMs, totalMs, reason) => {
+          this.view?.webview.postMessage({ type: 'api_delay', remainingMs, totalMs, reason });
+        },
         onTurnStart: (iteration) => {
           this.view?.webview.postMessage({ type: 'turn_start', iteration });
         },
@@ -692,6 +695,9 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
         onStatus: (status) => {
           this.view?.webview.postMessage({ type: 'status', text: status });
         },
+        onApiDelay: (remainingMs, totalMs, reason) => {
+          this.view?.webview.postMessage({ type: 'api_delay', remainingMs, totalMs, reason });
+        },
         onTurnStart: (iteration) => {
           this.view?.webview.postMessage({ type: 'turn_start', iteration });
         },
@@ -763,12 +769,13 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
     const htmlPath = path.join(uiDir, 'index.html');
     let html = fs.readFileSync(htmlPath, 'utf-8');
 
+    const now = Date.now();
     const stylesUri = webview.asWebviewUri(vscode.Uri.file(path.join(uiDir, 'styles.css')));
     const appJsUri = webview.asWebviewUri(vscode.Uri.file(path.join(uiDir, 'app.js')));
     const fileIconsUri = webview.asWebviewUri(vscode.Uri.file(path.join(uiDir, 'file-icons')));
 
-    html = html.replace('href="styles.css"', `href="${stylesUri}"`);
-    html = html.replace('src="app.js"', `src="${appJsUri}"`);
+    html = html.replace('href="styles.css"', `href="${stylesUri}?v=${now}"`);
+    html = html.replace('src="app.js"', `src="${appJsUri}?v=${now}"`);
     html = html.replace('</head>', `<script>window.FILE_ICONS_URI = "${fileIconsUri}";</script></head>`);
 
     return html;
