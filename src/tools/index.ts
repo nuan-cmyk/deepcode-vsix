@@ -25,45 +25,16 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'list_files',
-      description: 'List project files and directories in the workspace to discover project structure.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Optional directory path or folder to list' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'view_file_slice',
-      description: 'View specific lines of a file from the workspace. Use this to inspect imports (lines 1-45), functions, or target areas without loading huge files.',
+      name: 'edit_file',
+      description: 'Surgically replace a block of text in an existing file. search block must match existing code verbatim.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'Relative or absolute path to the file' },
-          startLine: { type: 'number', description: 'Starting line number (1-indexed, inclusive)' },
-          endLine: { type: 'number', description: 'Ending line number (1-indexed, inclusive)' }
+          search: { type: 'string', description: 'The exact lines or block of text to be replaced (verbatim from read_file)' },
+          replace: { type: 'string', description: 'The new replacement code' }
         },
-        required: ['path', 'startLine', 'endLine']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'replace_file_content',
-      description: 'Surgically replace a single exact block of text in an existing file. targetContent must match the file content character-for-character, including whitespace.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Relative or absolute path to the file' },
-          targetContent: { type: 'string', description: 'The exact lines or block of text to be replaced' },
-          replacementContent: { type: 'string', description: 'The new replacement code' }
-        },
-        required: ['path', 'targetContent', 'replacementContent']
+        required: ['path', 'search', 'replace']
       }
     }
   },
@@ -71,7 +42,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'write_file',
-      description: 'Create a new file or completely overwrite an existing file with the provided content.',
+      description: 'Create a new file or overwrite an existing file with the provided content.',
       parameters: {
         type: 'object',
         properties: {
@@ -86,13 +57,41 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'list_workspace_files',
+      name: 'list_files',
       description: 'List project files and directories in the workspace to discover project structure.',
       parameters: {
         type: 'object',
         properties: {
-          folder: { type: 'string', description: 'Optional subfolder to list' },
+          path: { type: 'string', description: 'Optional directory path or folder to list' },
           recursive: { type: 'boolean', description: 'Whether to list recursively (defaults to false)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description: 'Execute a terminal command (e.g. test runner, compiler, linter) and capture output.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'Command to run (e.g. pytest, npm test, tsc --noEmit)' },
+          cwd: { type: 'string', description: 'Optional working directory' }
+        },
+        required: ['command']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_diagnostics',
+      description: 'Retrieve active language server diagnostics (syntax errors, type issues, linter warnings) from VS Code.',
+      parameters: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Optional file path to inspect. If omitted, checks all workspace files.' }
         }
       }
     }
@@ -115,15 +114,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'run_terminal_command',
-      description: 'Execute a terminal command (e.g. test runner, compiler, linter) and capture output.',
+      name: 'read_rule',
+      description: 'Retrieve specialized engineering guidance markdown rules (e.g. chunked_reading, surgical_editing, self_healing).',
       parameters: {
         type: 'object',
         properties: {
-          command: { type: 'string', description: 'Command to run (e.g. pytest, npm test, tsc --noEmit)' },
-          cwd: { type: 'string', description: 'Optional working directory' }
+          ruleName: { type: 'string', description: 'Name of the rule: plan_and_structure, chunked_reading, surgical_editing, closed_loop_verification, background_tasks, final_summary, self_healing, terminal_execution' }
         },
-        required: ['command']
+        required: ['ruleName']
       }
     }
   },
@@ -138,33 +136,6 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           question: { type: 'string', description: 'The question or confirmation prompt for the user' }
         },
         required: ['question']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_diagnostics',
-      description: 'Retrieve active language server diagnostics (syntax errors, type issues, linter warnings) from VS Code.',
-      parameters: {
-        type: 'object',
-        properties: {
-          filePath: { type: 'string', description: 'Optional file path to inspect. If omitted, checks all workspace files.' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'read_rule',
-      description: 'Retrieve specialized markdown engineering guidance (e.g. chunked_reading, surgical_editing, self_healing).',
-      parameters: {
-        type: 'object',
-        properties: {
-          ruleName: { type: 'string', description: 'Name of the rule: chunked_reading, surgical_editing, self_healing, terminal_execution' }
-        },
-        required: ['ruleName']
       }
     }
   }
@@ -832,9 +803,7 @@ export class ToolExecutor {
     const extPath = this.extensionContext.extensionPath;
     const candidates = [
       path.join(extPath, 'src', 'prompts', 'rules', `${ruleName}.md`),
-      path.join(extPath, 'src', 'prompts', 'rag', `${ruleName}.md`),
-      path.join(extPath, 'src', 'prompts', 'rules', `${ruleName}`),
-      path.join(extPath, 'src', 'prompts', 'rag', `${ruleName}`)
+      path.join(extPath, 'src', 'prompts', 'rules', `${ruleName}`)
     ];
 
     for (const p of candidates) {
@@ -845,7 +814,7 @@ export class ToolExecutor {
     }
 
     return {
-      output: `Rule '${ruleName}' not found. Available RAG rules: plan_and_structure, chunked_reading, surgical_editing, closed_loop_verification, background_tasks, final_summary.`,
+      output: `Rule '${ruleName}' not found. Available rules: plan_and_structure, chunked_reading, surgical_editing, closed_loop_verification, background_tasks, final_summary, self_healing, terminal_execution.`,
       error: true
     };
   }

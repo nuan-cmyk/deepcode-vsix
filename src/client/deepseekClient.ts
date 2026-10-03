@@ -21,6 +21,7 @@ export interface StreamCallbacks {
   onError: (error: Error) => void;
   onComplete: (finishReason: string) => void;
   onStatus?: (status: string) => void;
+  onApiDelay?: (remainingMs: number, totalMs: number, reason: string) => void;
 }
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -153,6 +154,39 @@ export async function delayForNewRequest(delayMs: number, signal?: AbortSignal):
       resolve();
     }, { once: true });
   });
+}
+
+export async function delayWithCountdown(
+  waitMs: number,
+  reason: string,
+  callbacks?: StreamCallbacks,
+  signal?: AbortSignal
+): Promise<void> {
+  if (waitMs <= 0) return;
+  const startTime = Date.now();
+  const endTime = startTime + waitMs;
+
+  while (Date.now() < endTime) {
+    if (signal?.aborted) return;
+    const remainingMs = Math.max(0, endTime - Date.now());
+    callbacks?.onApiDelay?.(remainingMs, waitMs, reason);
+    const secStr = (remainingMs / 1000).toFixed(1);
+    callbacks?.onStatus?.(`API Delay: ${secStr}s (${reason})`);
+
+    const stepMs = Math.min(100, remainingMs);
+    if (stepMs <= 0) break;
+    await new Promise<void>(r => {
+      const tm = setTimeout(r, stepMs);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(tm);
+        r();
+      }, { once: true });
+    });
+  }
+
+  if (!signal?.aborted) {
+    callbacks?.onApiDelay?.(0, waitMs, reason);
+  }
 }
 
 export class DeepSeekClient {
@@ -361,14 +395,15 @@ export class DeepSeekClient {
       // Explicitly notify the model about the active sandbox mode so it knows when mode changed in multi-turn chats
       if (options.sandboxMode && messagesForPayload.length > 0) {
         let modeNotice = '';
+        const toolContract = ' Invoke tools directly using XML format: <tool_call name="run_command"><command>...</command></tool_call>, <tool_call name="read_file"><path>...</path><start_line>1</start_line><end_line>65</end_line></tool_call>, <tool_call name="edit_file"><path>...</path><search>...</search><replace>...</replace></tool_call>, <tool_call name="create_file"><path>...</path><content>...</content></tool_call>. Do NOT output commands or files inside conversational markdown blocks.';
         if (options.sandboxMode === 'helper') {
-          modeNotice = '[SYSTEM NOTIFICATION: Sandbox Security mode is currently HELPER (RW: Read & Write allowed, terminal execution disabled). You CAN create and edit project files. Proceed with requested file changes.]\n';
+          modeNotice = `[SYSTEM NOTIFICATION: Sandbox Security mode is currently HELPER (RW: Read & Write allowed, terminal execution disabled). You CAN create and edit project files.${toolContract}]\n`;
         } else if (options.sandboxMode === 'local') {
-          modeNotice = '[SYSTEM NOTIFICATION: Sandbox Security mode is currently LOCAL (RWX: Read, Write & Execute allowed). You CAN create and edit project files.]\n';
+          modeNotice = `[SYSTEM NOTIFICATION: Sandbox Security mode is currently LOCAL (RWX: Read, Write & Execute allowed). You CAN create, edit files and run terminal commands.${toolContract}]\n`;
         } else if (options.sandboxMode === 'bypass') {
-          modeNotice = '[SYSTEM NOTIFICATION: Sandbox Security mode is currently BYPASS (Full unrestricted RWX). You CAN create, edit files and run commands.]\n';
+          modeNotice = `[SYSTEM NOTIFICATION: Sandbox Security mode is currently BYPASS (Full unrestricted RWX). You CAN create, edit files and run terminal commands.${toolContract}]\n`;
         } else if (options.sandboxMode === 'ask') {
-          modeNotice = '[SYSTEM NOTIFICATION: Sandbox Security mode is currently ASK (Read-Only: r--). File creation, editing, and commands are disabled.]\n';
+          modeNotice = '[SYSTEM NOTIFICATION: Sandbox Security mode is currently ASK (Read-Only: r--). File creation, editing, and terminal commands are disabled. Answer user questions directly in plain text.]\n';
         }
 
         const firstUser = messagesForPayload.find(m => m.role === 'user');
@@ -403,10 +438,7 @@ export class DeepSeekClient {
         if (elapsedSinceLast < this.pacingDelayMs) {
           const waitMs = this.pacingDelayMs - elapsedSinceLast;
           logger.log('API', `Pacing: waiting ${waitMs}ms before sending turn to conversation ${payload.conversation_id}...`);
-          await new Promise<void>(r => {
-            const tm = setTimeout(r, waitMs);
-            signal?.addEventListener('abort', () => { clearTimeout(tm); r(); }, { once: true });
-          });
+          await delayWithCountdown(waitMs, 'pacing', callbacks, signal);
           if (signal?.aborted) {
             callbacks.onComplete('cancelled');
             return;
@@ -417,8 +449,7 @@ export class DeepSeekClient {
       // Configurable delay before dispatching each new request to the API
       if (this.requestDelayMs > 0) {
         logger.log('API', `Request delay: waiting ${this.requestDelayMs}ms before sending request to API...`);
-        callbacks.onStatus?.(`Request delay (${this.requestDelayMs}ms)...`);
-        await delayForNewRequest(this.requestDelayMs, signal);
+        await delayWithCountdown(this.requestDelayMs, 'request delay', callbacks, signal);
         if (signal?.aborted) {
           callbacks.onComplete('cancelled');
           return;
@@ -461,10 +492,18 @@ export class DeepSeekClient {
         }, this.connectTimeoutMs);
       }
 
-      // Transient 502 / 503 / 504 retry
-      if (!response.ok && (response.status === 502 || response.status === 503 || response.status === 504) && !signal?.aborted) {
-        callbacks.onStatus?.(`Шлюз вернул ${response.status}. Повторная попытка через 2 сек...`);
-        await new Promise(r => setTimeout(r, 2000));
+      // Transient 429 / 502 / 503 / 504 retry
+      if (!response.ok && (response.status === 429 || response.status === 502 || response.status === 503 || response.status === 504) && !signal?.aborted) {
+        let retryDelaySec = 3;
+        const retryAfterHeader = response.headers.get('Retry-After');
+        if (retryAfterHeader) {
+          const parsedSec = parseInt(retryAfterHeader, 10);
+          if (!isNaN(parsedSec) && parsedSec > 0) {
+            retryDelaySec = parsedSec;
+          }
+        }
+        callbacks.onStatus?.(response.status === 429 ? `Лимит запросов (429). Ожидание ${retryDelaySec} сек...` : `Шлюз вернул ${response.status}. Повторная попытка через ${retryDelaySec} сек...`);
+        await new Promise(r => setTimeout(r, retryDelaySec * 1000));
         if (!signal?.aborted) {
           response = await fetchWithTimeout(url, {
             method: 'POST',

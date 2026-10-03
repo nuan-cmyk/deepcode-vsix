@@ -57,18 +57,7 @@ export function calculateTargetCompactedTokens(currentTokens: number): number {
   return Math.round(targetTokens);
 }
 
-/**
- * Calculates retention stats: ratio of active tokens to total raw tokens processed.
- */
-export function calculateRetentionStats(rawTokensTotal: number, currentActiveTokens: number) {
-  if (rawTokensTotal <= 0) return { retentionPercent: 100, savedPercent: 0 };
-  const retentionPercent = (currentActiveTokens / rawTokensTotal) * 100;
-  const savedPercent = Math.max(0, 100 - retentionPercent);
-  return {
-    retentionPercent: Number(retentionPercent.toFixed(2)),
-    savedPercent: Number(savedPercent.toFixed(2))
-  };
-}
+
 
 export interface TokenUsageStats {
   promptTokens: number;
@@ -240,14 +229,3 @@ export function countConversationTokens(
   };
 }
 
-/**
- * Human-readable token formatter (e.g. 1.2k, 64k).
- */
-export function formatTokens(num: number): string {
-  if (num < 1000) return num.toString();
-  if (num < 1000000) {
-    if (num < 10000) return (num / 1000).toFixed(1) + 'k';
-    return Math.round(num / 1000) + 'k';
-  }
-  return (num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1) + 'M';
-}

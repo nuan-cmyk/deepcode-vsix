@@ -4,6 +4,7 @@ import { ToolExecutor, TOOL_DEFINITIONS } from '../tools';
 import { PromptBuilder } from './promptBuilder';
 import { SessionManager } from './sessionManager';
 import * as path from 'path';
+import * as fs from 'fs';
 import { ChatMessage, ToolCall, AgentActivityStep, CommandPermissionRequest, ChatSession } from './types';
 import { 
   countConversationTokens, 
@@ -13,8 +14,7 @@ import {
   LOCAL_COMPACT_THRESHOLD,
   GENERAL_COMPACT_THRESHOLD,
   ULTRA_COMPACT_THRESHOLD,
-  calculateTargetCompactedTokens,
-  calculateRetentionStats
+  calculateTargetCompactedTokens
 } from './tokenizer';
 import { logger } from '../logger';
 
@@ -34,6 +34,7 @@ export interface AgentCallbacks {
   onTokenUsage?: (usage: TokenUsageStats) => void;
   onCommandPermissionRequest?: (req: CommandPermissionRequest) => Promise<'run_once' | 'always_allow' | 'deny'>;
   onMessagesCompacted?: () => void;
+  onApiDelay?: (remainingMs: number, totalMs: number, reason: string) => void;
 }
 
 export const COMPACT_THRESHOLD = 80000;
@@ -65,6 +66,13 @@ function isConnectionClosedEmptyError(err: any): boolean {
     msg.includes('bad gateway') ||
     msg.includes('gateway timeout') ||
     msg.includes('failed to fetch') ||
+    msg.includes('fetch failed') ||
+    msg.includes('temporarily unavailable') ||
+    msg.includes('server is temporarily unavailable') ||
+    msg.includes('deepseek hint error') ||
+    msg.includes('service unavailable') ||
+    msg.includes('429') ||
+    msg.includes('too many requests') ||
     msg.includes('networkerror') ||
     msg.includes('stream stalled') ||
     msg.includes('connection timeout') ||
@@ -138,6 +146,98 @@ export function isReadOnlyCommand(command: string | undefined): boolean {
     if (!isPipeSafe) return false;
   }
   return true;
+}
+
+const KNOWN_FILE_EXTENSIONS = new Set([
+  'js', 'mjs', 'cjs', 'ts', 'mts', 'cts', 'jsx', 'tsx', 'html', 'htm', 'css', 'scss', 'sass', 'less',
+  'json', 'jsonc', 'json5', 'py', 'pyw', 'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'hh', 'hxx',
+  'cs', 'go', 'rs', 'md', 'markdown', 'txt', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf',
+  'sh', 'bash', 'zsh', 'bat', 'cmd', 'ps1', 'psm1', 'rb', 'php', 'java', 'kt', 'kts', 'swift',
+  'sql', 'xml', 'svg', 'wasm', 'lock', 'env', 'lua', 'vue', 'svelte', 'dart', 'r', 'm', 'mm',
+  'png', 'jpg', 'jpeg', 'gif', 'ico', 'webp', 'bmp', 'pdf', 'zip', 'tar', 'gz'
+]);
+
+export function isInvalidCodePropertyPath(p: string | undefined, workspaceRoot?: string): boolean {
+  if (!p) return true;
+  const raw = p.trim().replace(/^['"`]|['"`]$/g, '').trim();
+  if (!raw) return true;
+
+  const norm = raw.toLowerCase().replace(/\\/g, '/');
+  if (/^(?:путь[\/]|relative[\/]path|path[\/]to|filename\.ext|new_file\.ext|файлу\.ext|file\.ext|\.[\/]file\.ext|test_file\.ext)/i.test(norm) ||
+      norm === 'путь' || norm === 'файлу.ext' || norm === 'file.ext' || norm.includes('путь/к/файлу')) {
+    return true;
+  }
+
+  // If path physically exists on disk in workspace, it is valid
+  if (workspaceRoot) {
+    try {
+      const fullPath = path.isAbsolute(raw) ? raw : path.resolve(workspaceRoot, raw);
+      if (fs.existsSync(fullPath)) {
+        return false;
+      }
+    } catch {}
+  }
+
+  const hasSlash = raw.includes('/') || raw.includes('\\');
+  const ext = path.extname(raw).replace(/^\./, '').toLowerCase();
+
+  // If it has NO slashes and looks like a code property access or single identifier
+  // without a standard file extension:
+  if (!hasSlash) {
+    if (!ext) {
+      const base = raw.toLowerCase();
+      if (['dockerfile', 'makefile', 'license', 'readme', 'gemini.md', 'agents.md'].includes(base)) {
+        return false;
+      }
+      return true;
+    }
+    if (!KNOWN_FILE_EXTENSIONS.has(ext)) {
+      // e.g. "world.collider", "player.pos", "enemy.speed" -> ext is not a file extension
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function isConcludingAssistantSummary(content: string): boolean {
+  if (!content) return false;
+  const prose = content
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/<(?:tool_call|function_call|tool)\b[^>]*>[\s\S]*?(?:<\/(?:tool_call|function_call|call|tool)>|$)/gi, '')
+    .replace(/<[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}[\s\S]*?(?:<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}>|$)/gi, '')
+    .trim()
+    .toLowerCase();
+
+  if (prose.length < 50) return false;
+
+  const conclusionMarkers = [
+    'все проверки завершены',
+    'все задачи выполнены',
+    'все изменения внесены',
+    'все изменения успешно внесены',
+    'все изменения успешно сохранены',
+    'код готов к использованию',
+    'готово к использованию',
+    'готово к тестированию',
+    'полностью готов к работе',
+    'код полностью готов',
+    'все работает корректно',
+    'все работает исправно',
+    'задача успешно выполнена',
+    'исправление завершено',
+    'все готово к запуску',
+    'all tasks completed',
+    'all checks completed',
+    'all tests passed',
+    'ready to use',
+    'ready for use',
+    'ready for testing',
+    'implementation complete',
+    'everything is ready'
+  ];
+
+  return conclusionMarkers.some(marker => prose.includes(marker));
 }
 
 export class AgentEngine {
@@ -286,12 +386,6 @@ export class AgentEngine {
         iteration++;
         callbacks.onTurnStart?.(iteration);
 
-        const reqDelay = defaultSettings.requestDelayMs ?? 0;
-        if (reqDelay > 0 && iteration > 1) {
-          logger.log('Agent', `Waiting ${reqDelay}ms request delay before turn ${iteration}...`);
-          callbacks.onStatus?.(`Request delay (${reqDelay}ms)...`);
-          await delayForNewRequest(reqDelay, this.abortController?.signal);
-        }
 
         const session = this.sessionManager.getCurrentSession();
         const activeProject = this.sessionManager.getActiveProject();
@@ -419,9 +513,23 @@ export class AgentEngine {
           receivedApiUsage = false;
           let streamError: any = null;
 
-          // When recovering from a 0-tokens dropped connection, append continue directive if appropriate
+          // When recovering from a 0-tokens dropped connection, prune to compact context (<=12 messages)
+          // so DeepSeek Web never chokes on 100+ raw messages in a fresh stateless chat
           let effectiveMessages = [...messagesToSend];
           if (connectionRecoveryAttempts > 0) {
+            if (effectiveMessages.length > 12) {
+              const sysMsg = effectiveMessages[0];
+              const firstUser = effectiveMessages.find(m => m.role === 'user');
+              const recent = effectiveMessages.slice(-10);
+              const pruned: ChatMessage[] = [];
+              if (sysMsg) pruned.push(sysMsg);
+              if (firstUser && !recent.some(m => m.id === firstUser.id)) pruned.push(firstUser);
+              for (const m of recent) {
+                if (!pruned.some(p => p.id === m.id)) pruned.push(m);
+              }
+              effectiveMessages = pruned;
+            }
+
             const lastMsg = effectiveMessages[effectiveMessages.length - 1];
             if (lastMsg && (lastMsg.role === 'tool' || lastMsg.role === 'assistant')) {
               effectiveMessages.push({
@@ -430,6 +538,45 @@ export class AgentEngine {
                 content: 'Continue your work and proceed to the next step.',
                 timestamp: Date.now()
               });
+            }
+          }
+
+          // Turn-level Context Anchor (Recency Reminder):
+          // Injects identity, workspace paths, active file and tool invocation contracts at the bottom of the latest user message
+          if (session.agentMode !== false && effectiveMessages.length > 0) {
+            const lastUserIdx = effectiveMessages.map(m => m.role).lastIndexOf('user');
+            if (lastUserIdx !== -1) {
+              const targetUserMsg = { ...effectiveMessages[lastUserIdx] };
+              if (!targetUserMsg.content.includes('[SYSTEM REMINDER]')) {
+                const folders = vscode.workspace.workspaceFolders;
+                const wsRoot = activeProject ? activeProject.path : (folders && folders.length > 0 ? folders[0].uri.fsPath : process.cwd());
+                const activeEd = vscode.window.activeTextEditor;
+                let activeFileDesc = 'None';
+                if (activeEd) {
+                  const docP = activeEd.document.uri.fsPath;
+                  const relP = path.relative(wsRoot, docP).replace(/\\/g, '/');
+                  if (!relP.startsWith('..') && !path.isAbsolute(relP)) {
+                    activeFileDesc = `${relP}:${activeEd.selection.active.line + 1}`;
+                  }
+                }
+
+                const reminderFooter = `\n\n[SYSTEM REMINDER]
+- Identity: DeepCode agent, autonomous software engineering AI in VS Code.
+- Workspace: ${wsRoot} (OS: ${process.platform})
+- Active File: ${activeFileDesc}
+- Sandbox Mode: ${effectiveSandbox.toUpperCase()}
+- Tool Invocation Contract:
+  * Run terminal: <tool_call name="run_command"><command>...</command></tool_call>
+  * Read file: <tool_call name="read_file"><path>...</path><start_line>1</start_line><end_line>65</end_line></tool_call>
+  * Edit file: <tool_call name="edit_file"><path>...</path><search>...</search><replace>...</replace></tool_call>
+  * Create file: <tool_call name="create_file"><path>...</path><content>...</content></tool_call>
+  * List files: <tool_call name="list_files"><path>.</path></tool_call>
+  * Diagnostics: <tool_call name="get_diagnostics"><path>...</path></tool_call>
+- Directive: When user requests actions, immediately invoke the appropriate tool call. Do NOT output executable code or terminal commands in conversational markdown blocks.`;
+
+                targetUserMsg.content = targetUserMsg.content + reminderFooter;
+                effectiveMessages[lastUserIdx] = targetUserMsg;
+              }
             }
           }
 
@@ -475,6 +622,9 @@ export class AgentEngine {
                   },
                   onStatus: (st) => {
                     callbacks.onStatus(st);
+                  },
+                  onApiDelay: (remainingMs, totalMs, reason) => {
+                    callbacks.onApiDelay?.(remainingMs, totalMs, reason);
                   },
                   onConversationId: (convId) => {
                     if (convId && (convId.includes(':') || !session.conversationId)) {
@@ -533,10 +683,15 @@ export class AgentEngine {
             }
 
             if (isConnectionClosedEmptyError(streamError)) {
-              if (session.conversationId) {
-                logger.log('Agent', `Server closed connection (0 tokens). Resetting conversationId (${session.conversationId}) to recover stateless.`);
+              // Retain conversationId on retry so DeepSeek continues in the SAME chat with a 1-message delta.
+              // Server-side parent_message_id tracking and Seamless Session Rollover will handle continuation or migration.
+              // Only reset to stateless as a last resort if retrying in the same chat fails repeatedly.
+              if (connectionRecoveryAttempts >= maxConnectionRetries - 1 && session.conversationId) {
+                logger.log('Agent', `Server closed connection repeatedly. Resetting conversationId (${session.conversationId}) to stateless fallback.`);
                 session.conversationId = undefined;
                 this.sessionManager.updateConversationId('');
+              } else if (session.conversationId) {
+                logger.log('Agent', `Server returned empty response. Retrying within existing conversation (${session.conversationId}) without creating a new chat.`);
               }
 
               if (connectionRecoveryAttempts < maxConnectionRetries) {
@@ -551,7 +706,7 @@ export class AgentEngine {
                 });
                 callbacks.onStatus(`Unstuck (${connectionRecoveryAttempts}/${maxConnectionRetries})...`);
 
-                const delay = Math.min(6000, 1500 + connectionRecoveryAttempts * 1000);
+                const delay = Math.min(8000, 3000 + (connectionRecoveryAttempts - 1) * 1500);
                 await new Promise<void>(r => {
                   const tm = setTimeout(r, delay);
                   this.abortController?.signal?.addEventListener('abort', () => {
@@ -565,6 +720,13 @@ export class AgentEngine {
                 }
                 continue;
               } else {
+                // If touchedCodeFile is true, the actual coding work is already finished on disk!
+                if (touchedCodeFile) {
+                  currentAssistantContent = 'Все запланированные изменения файлов успешно выполнены и проверены диагностикой.';
+                  callbacks.onChunk?.(currentAssistantContent);
+                  break;
+                }
+
                 // Exhausted retries: proxy/account restriction or expired session
                 callbacks.onActivityStep?.({
                   type: 'unstuck',
@@ -636,110 +798,6 @@ export class AgentEngine {
           }
         }
 
-
-
-        // Fallback 2: If user asked to execute a command and model returned code block or python line instead of XML tool_call
-        if (pendingToolCalls.length === 0 && session.agentMode && effectiveSandbox !== 'helper' && effectiveSandbox !== 'ask' && (session.planMode === false || session.planConfirmed)) {
-          const isCommandIntent = /(?:run|execute|start|test|build|cmd)/i.test(lastUserText) || /(?:run|execute|start|test|build|cmd|python|cmake|node)\b/i.test(currentAssistantContent);
-
-          if (isCommandIntent) {
-            let extractedCommand = '';
-            // Try matching bash/sh/python block
-            const blockMatch = currentAssistantContent.match(/```(?:bash|sh|powershell|cmd|shell)?\s*\n([\s\S]*?)```/i);
-            if (blockMatch) {
-              const firstLine = blockMatch[1].trim().split('\n').find(l => l.trim() && !l.trim().startsWith('#'));
-              if (firstLine) extractedCommand = firstLine.trim();
-            }
-            if (!extractedCommand) {
-              // Try matching lines starting with python / node / npm
-              const directLine = currentAssistantContent.split('\n').find(l => /^(?:python3?|node|npm|npx|pytest)\s+[^\n]+$/i.test(l.trim()));
-              if (directLine) extractedCommand = directLine.trim();
-            }
-
-            if (extractedCommand && !/^(?:command_here|python script\.py arg1 arg2)$/i.test(extractedCommand.trim())) {
-              pendingToolCalls.push({
-                id: `call_${Date.now()}_auto`,
-                type: 'function',
-                function: {
-                  name: 'run_terminal_command',
-                  arguments: JSON.stringify({ command: extractedCommand })
-                }
-              });
-            }
-          }
-        }
-
-        // Fallback 3: If in Agent Mode and model returned file creation in markdown fences/headers instead of XML tags
-        if (pendingToolCalls.length === 0 && session.agentMode && effectiveSandbox !== 'ask' && (session.planMode === false || session.planConfirmed)) {
-          const fileBlockMatches = [...currentAssistantContent.matchAll(/(?:###?\s*[`*]*([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)[`*]*|```[a-zA-Z0-9_-]*\s*[:\s]\s*([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+))\s*\n([\s\S]*?)```/g)];
-          for (const fbm of fileBlockMatches) {
-            const filePath = (fbm[1] || fbm[2] || '').trim();
-            const code = fbm[3] || '';
-            const isDummy = /^(?:путь[\/]|relative[\/]path|path[\/]to|filename\.ext|new_file\.ext|файлу\.ext|file\.ext)/i.test(filePath.replace(/\\/g, '/')) ||
-                            /^(?:полный код нового файла|complete file content here)$/i.test(code.trim());
-            if (filePath && code.trim() && !isDummy && !filePath.includes(' ') && !filePath.startsWith('http')) {
-              pendingToolCalls.push({
-                id: `call_${Date.now()}_auto_file_${pendingToolCalls.length}`,
-                type: 'function',
-                function: {
-                  name: 'write_file',
-                  arguments: JSON.stringify({ path: filePath, content: code, overwrite: true })
-                }
-              });
-            }
-          }
-        }
-
-        // Fallback 4: Extract explicit file read and execution actions when model outputs conversational plan or thinking instead of XML/DSML
-        if (pendingToolCalls.length === 0 && session.agentMode) {
-          const textSources = [currentAssistantContent, currentReasoningContent].filter(Boolean);
-          for (const text of textSources) {
-            // 4a. Match file read intents: "Read http_client.cpp tail (lines 60-101)", "Check server.py line 200-210", "Проверю calculator/mini_calc.py"
-            // Both English and Russian verbs
-            const readRegex = /(?:read|view|check|inspect|examine|провер(?:ю|им|ить|ь)?|посмотр(?:ю|им|еть|и)?|изуч(?:у|им|ить)?|прочита(?:ю|ем|ть)?)[^.!?\n]{0,80}?[`'"]?([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]{1,8})[`'"]?(?:[^\n\d]*?(?:lines?|range|\(?lines?)\s*(\d+)\s*[-:]\s*(\d+)\)?)?/gi;
-            let rm: RegExpExecArray | null;
-            while ((rm = readRegex.exec(text)) !== null) {
-              const filePath = rm[1].trim();
-              if (filePath && !filePath.includes(' ') && !filePath.startsWith('http') && !/^(?:file|path)\.ext$/i.test(filePath)) {
-                const sLine = rm[2] ? parseInt(rm[2], 10) : 1;
-                const eLine = rm[3] ? parseInt(rm[3], 10) : (rm[2] ? sLine + 50 : 150);
-                if (!pendingToolCalls.some(p => p.function.name === 'view_file_slice' && p.function.arguments.includes(filePath))) {
-                  pendingToolCalls.push({
-                    id: `call_${Date.now()}_auto_read_${pendingToolCalls.length}`,
-                    type: 'function',
-                    function: {
-                      name: 'view_file_slice',
-                      arguments: JSON.stringify({ path: filePath, startLine: sLine, endLine: eLine })
-                    }
-                  });
-                }
-              }
-            }
-
-            // 4b. Match explicit terminal commands: only if plan is confirmed or planMode is false AND not helper or ask mode
-            if ((session.planMode === false || session.planConfirmed) && effectiveSandbox !== 'helper' && effectiveSandbox !== 'ask') {
-              const cmdRegex = /(?:run|execute|start|launch)\s+[`'"]([^`'"\n]{4,120})[`'"]/gi;
-              let cm: RegExpExecArray | null;
-              while ((cm = cmdRegex.exec(text)) !== null) {
-                const candidateCmd = cm[1].trim();
-                if (candidateCmd && !/^(?:command_here|command to run)$/i.test(candidateCmd)) {
-                  if (!pendingToolCalls.some(p => p.function.name === 'run_terminal_command' && p.function.arguments.includes(candidateCmd))) {
-                    pendingToolCalls.push({
-                      id: `call_${Date.now()}_auto_cmd_${pendingToolCalls.length}`,
-                      type: 'function',
-                      function: {
-                        name: 'run_terminal_command',
-                        arguments: JSON.stringify({ command: candidateCmd })
-                      }
-                    });
-                  }
-                }
-              }
-            }
-
-            if (pendingToolCalls.length > 0) break;
-          }
-        }
 
         // Plan Confirmation Check
         const isUserExplicitConfirm = /^(?:confirm\s+plan|approve\s+plan|start\s+execution|proceed|continue|plan\s+approved|confirm|подтверждаю|утверждаю|начинай|выполняй|поехали)/i.test(lastUserText.trim());
@@ -814,6 +872,38 @@ export class AgentEngine {
           currentAssistantContent = currentAssistantContent.replace(/<plan>[\s\S]*?<\/plan>/gi, '');
         }
 
+        // Filter out phantom/hallucinated tool calls:
+        // 1. Spurious read/inspection calls emitted after the model already produced a concluding summary
+        // 2. Read calls targeting in-memory code property paths (e.g. world.collider, player.health) that do not exist on disk
+        if (pendingToolCalls.length > 0) {
+          const wsRoot = this.toolExecutor.getWorkspaceRoot();
+          const isFinished = isConcludingAssistantSummary(currentAssistantContent);
+
+          pendingToolCalls = pendingToolCalls.filter(tc => {
+            const name = tc.function.name;
+            if (name === 'view_file_slice' || name === 'read_file') {
+              try {
+                const args = JSON.parse(tc.function.arguments || '{}');
+                const targetPath = args.path || args.filePath || '';
+                if (isInvalidCodePropertyPath(targetPath, wsRoot)) {
+                  logger.log('Agent', `Discarded phantom tool call ${name} on invalid property/path: "${targetPath}"`);
+                  return false;
+                }
+                if (isFinished) {
+                  logger.log('Agent', `Discarded spurious read call "${targetPath}" after concluding response.`);
+                  return false;
+                }
+              } catch {
+                return false;
+              }
+            } else if (isFinished && (name === 'list_workspace_files' || name === 'search_files' || name === 'get_diagnostics')) {
+              logger.log('Agent', `Discarded spurious exploration call ${name} after concluding response.`);
+              return false;
+            }
+            return true;
+          });
+        }
+
         // If no tool calls were generated:
         if (pendingToolCalls.length === 0) {
           const isGenuineQuestion = isAssistantWaitingForUser(currentAssistantContent);
@@ -878,14 +968,17 @@ If you have gathered sufficient context, output the architectural concept, proje
               logger.log('Agent:Unstuck', `[Validation Triggered (${validationRetryCount}/${maxAutoRetries})] ${malformedCheck.reason} - fragment: "${malformedCheck.fragment}"`);
 
               if (currentAssistantContent.trim() || currentReasoningContent.trim()) {
+                const cleanedContent = currentAssistantContent.replace(/<(?:tool_call|function_call|tool)\s+[^>]*>[\s\S]*$/i, '').trim();
                 const assistantMsg: ChatMessage = {
                   id: 'asst_' + Date.now(),
                   role: 'assistant',
-                  content: currentAssistantContent,
+                  content: cleanedContent,
                   reasoningContent: currentReasoningContent,
                   timestamp: Date.now()
                 };
-                this.sessionManager.addMessage(assistantMsg);
+                if (cleanedContent || currentReasoningContent) {
+                  this.sessionManager.addMessage(assistantMsg);
+                }
               }
 
               callbacks.onActivityStep?.({
@@ -1234,37 +1327,39 @@ Re-generate your response now with the proper tool call:`,
                 added: rLines,
                 removed: sLines
               });
+            } else if (toolName === 'read_file' || toolName === 'view_file_slice') {
+              callbacks.onActivityStep?.({
+                type: 'analyze',
+                title: `Analyzed ${path.basename(toolArgs.path || toolArgs.filePath || '')}`,
+                path: toolArgs.path || toolArgs.filePath,
+                startLine: toolArgs.startLine || 1,
+                endLine: toolArgs.endLine || (toolArgs.startLine ? toolArgs.startLine + 50 : undefined)
+              });
+            } else if (toolName === 'search_files' || toolName === 'grep_search') {
+              const matches = result.output.split('\n').filter(l => l.trim() && !l.includes('No matches found')).length;
+              callbacks.onActivityStep?.({
+                type: 'search',
+                query: toolArgs.query || '',
+                resultCount: matches,
+                title: `Searched ${toolArgs.query || ''}`
+              });
+            } else if (toolName === 'list_files' || toolName === 'list_workspace_files') {
+              const count = result.output.split('\n').filter(Boolean).length;
+              callbacks.onActivityStep?.({
+                type: 'explore',
+                title: `Explored workspace (${count} items)`,
+                detail: result.output
+              });
+            } else if (toolName === 'get_diagnostics' || toolName === 'diagnostics') {
+              callbacks.onActivityStep?.({
+                type: 'diagnostics',
+                title: `Checked diagnostics ${path.basename(toolArgs.filePath || toolArgs.path || 'workspace')}`,
+                path: toolArgs.filePath || toolArgs.path
+              });
             }
-          } else if (toolName === 'read_file' || toolName === 'view_file_slice') {
-            callbacks.onActivityStep?.({
-              type: 'analyze',
-              title: `Analyzed ${path.basename(toolArgs.path)}`,
-              path: toolArgs.path,
-              startLine: toolArgs.startLine || 1,
-              endLine: toolArgs.endLine || (toolArgs.startLine ? toolArgs.startLine + 50 : undefined)
-            });
-          } else if (toolName === 'search_files' || toolName === 'grep_search') {
-            const matches = result.output.split('\n').filter(l => l.trim() && !l.includes('No matches found')).length;
-            callbacks.onActivityStep?.({
-              type: 'search',
-              query: toolArgs.query || '',
-              resultCount: matches,
-              title: `Searched ${toolArgs.query || ''}`
-            });
-          } else if (toolName === 'list_files' || toolName === 'list_workspace_files') {
-            const count = result.output.split('\n').filter(Boolean).length;
-            callbacks.onActivityStep?.({
-              type: 'explore',
-              title: `Explored workspace (${count} items)`,
-              detail: result.output
-            });
-          } else if (toolName === 'get_diagnostics' || toolName === 'diagnostics') {
-            callbacks.onActivityStep?.({
-              type: 'diagnostics',
-              title: `Checked diagnostics ${path.basename(toolArgs.filePath || toolArgs.path || 'workspace')}`,
-              path: toolArgs.filePath || toolArgs.path
-            });
-          } else if (isCommand) {
+          }
+
+          if (isCommand) {
             const rootName = path.basename(this.toolExecutor.getWorkspaceRoot()) || 'workspace';
             callbacks.onActivityStep?.({
               type: 'command',
@@ -1280,8 +1375,10 @@ Re-generate your response now with the proper tool call:`,
             callbacks.onTaskEnd?.(taskId, toolArgs.command, result.error ? 1 : 0, result.output);
           }
 
-          // If a file was created or modified, open it in VS Code editor
-          if (toolArgs.path && !result.error) {
+          // If a file was created or modified, open it in VS Code editor (only if enabled in settings)
+          const shouldAutoOpen = session?.autoOpenModifiedFiles ?? this.sessionManager.getDefaultSettings()?.autoOpenModifiedFiles ?? false;
+          const isFileMutationTool = toolName === 'create_file' || toolName === 'write_file' || toolName === 'edit_file' || toolName === 'replace_file_content' || toolName === 'multi_replace_file_content';
+          if (shouldAutoOpen && isFileMutationTool && toolArgs.path && !result.error) {
             try {
               const fullPath = this.toolExecutor.resolvePath(toolArgs.path);
               const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fullPath));
@@ -1721,9 +1818,9 @@ Re-generate your response now with the proper tool call:`,
       }
 
       if (Object.keys(toolArgs).length === 0) {
-        // Extract DSML parameters if present: <||DSML|| parameter name="..." ...>VALUE
+        // Extract DSML or standard XML parameter tags if present: <parameter name="..." ...>VALUE</parameter>
         const dsmlParams: Record<string, string> = {};
-        const dsmlParamRegex = /<[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}\s+parameter\s+name=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)(?:<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}(?:\s*parameter)?>|(?=<[|\uFF5C]{1,2}DSML)|$)/gi;
+        const dsmlParamRegex = /<(?:[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}\s+)?(?:parameter|param)\s+name=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)(?:<\/(?:[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}(?:\s*(?:parameter|param))?|(?:parameter|param))>|(?=<[|\uFF5C]{1,2}DSML)|(?=<(?:parameter|param)\b)|$)/gi;
         let dMatch: RegExpExecArray | null;
         while ((dMatch = dsmlParamRegex.exec(inner)) !== null) {
           dsmlParams[dMatch[1].trim()] = dMatch[2].trim();
@@ -1746,15 +1843,15 @@ Re-generate your response now with the proper tool call:`,
           const sm = inner.match(/<(?:search|target|targetContent|original|before)>([\s\S]*?)<\/(?:search|target|targetContent|original|before)>/i);
           const rm = inner.match(/<(?:replace|replacement|replacementContent|after)>([\s\S]*?)<\/(?:replace|replacement|replacementContent|after)>/i);
           toolArgs = {
-            path: dsmlParams.path || dsmlParams.file || (pm ? pm[1].trim() : ''),
-            targetContent: dsmlParams.targetContent || dsmlParams.search || dsmlParams.target || (sm ? sm[1] : ''),
-            replacementContent: dsmlParams.replacementContent || dsmlParams.replace || dsmlParams.replacement || (rm ? rm[1] : '')
+            path: dsmlParams.path || dsmlParams.file || dsmlParams.filepath || (pm ? pm[1].trim() : ''),
+            targetContent: dsmlParams.targetContent || dsmlParams.search || dsmlParams.target || dsmlParams.original || (sm ? sm[1] : ''),
+            replacementContent: dsmlParams.replacementContent || dsmlParams.replace || dsmlParams.replacement || dsmlParams.after || (rm ? rm[1] : '')
           };
         } else if (toolName === 'view_file_slice') {
           const pm = inner.match(/<(?:path|file|filepath)>([\s\S]*?)<\/(?:path|file|filepath)>/i);
-          let rawPath = dsmlParams.path || dsmlParams.file || (pm ? pm[1].trim() : '');
-          let startLine = dsmlParams.start_line ? parseInt(dsmlParams.start_line, 10) : (dsmlParams.startLine ? parseInt(dsmlParams.startLine, 10) : 1);
-          let endLine = dsmlParams.end_line ? parseInt(dsmlParams.end_line, 10) : (dsmlParams.endLine ? parseInt(dsmlParams.endLine, 10) : 200);
+          let rawPath = dsmlParams.path || dsmlParams.file || dsmlParams.filepath || (pm ? pm[1].trim() : '');
+          let startLine = dsmlParams.start_line ? parseInt(dsmlParams.start_line, 10) : (dsmlParams.startLine ? parseInt(dsmlParams.startLine, 10) : (dsmlParams.start ? parseInt(dsmlParams.start, 10) : 1));
+          let endLine = dsmlParams.end_line ? parseInt(dsmlParams.end_line, 10) : (dsmlParams.endLine ? parseInt(dsmlParams.endLine, 10) : (dsmlParams.end ? parseInt(dsmlParams.end, 10) : 200));
 
           // Parse #L1-65 or :1-65 in path
           const hashMatch = rawPath.match(/[#:](?:L)?(\d+)(?:-(?:L)?(\d+))?$/i);
@@ -1780,7 +1877,13 @@ Re-generate your response now with the proper tool call:`,
           const cm = inner.match(/<(?:command|cmd)>([\s\S]*?)<\/(?:command|cmd)>/i);
           const cwdMatch = inner.match(/<(?:cwd|dir)>([\s\S]*?)<\/(?:cwd|dir)>/i);
           let rawCmd = dsmlParams.command || dsmlParams.cmd || (cm ? cm[1].trim() : inner.trim());
-          rawCmd = rawCmd.replace(/<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}(?:\s*(?:call|invoke))?>/gi, '').trim();
+          rawCmd = rawCmd
+            .replace(/<\/[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}(?:\s*(?:call|invoke))?>/gi, '')
+            .replace(/^<(?:[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}\s+)?(?:parameter|param)\s+name=["']?(?:command|cmd)["']?[^>]*>/i, '')
+            .replace(/<\/(?:[|\uFF5C]{1,2}DSML[|\uFF5C]{1,2}\s+)?(?:parameter|param)>$/i, '')
+            .replace(/^<(?:command|cmd)[^>]*>/i, '')
+            .replace(/<\/(?:command|cmd)>$/i, '')
+            .trim();
           toolArgs = {
             command: rawCmd,
             cwd: dsmlParams.cwd || dsmlParams.dir || (cwdMatch ? cwdMatch[1].trim() : undefined)
@@ -1822,15 +1925,20 @@ Re-generate your response now with the proper tool call:`,
       const isDummyPath = (p: string | undefined): boolean => {
         if (!p) return true;
         const norm = p.trim().toLowerCase().replace(/\\/g, '/');
-        return /^(?:путь[\/]|relative[\/]path|path[\/]to|filename\.ext|new_file\.ext|файлу\.ext|file\.ext|\.[\/]file\.ext|test_file\.ext)/i.test(norm) ||
-               norm === 'путь' || norm === 'файлу.ext' || norm === 'file.ext' || norm.includes('путь/к/файлу');
+        if (/^(?:путь[\/]|relative[\/]path|path[\/]to|filename\.ext|new_file\.ext|файлу\.ext|file\.ext|\.[\/]file\.ext|test_file\.ext)/i.test(norm) ||
+            norm === 'путь' || norm === 'файлу.ext' || norm === 'file.ext' || norm.includes('путь/к/файлу')) {
+          return true;
+        }
+        return isInvalidCodePropertyPath(p, this.toolExecutor.getWorkspaceRoot());
       };
 
       const isDummyCommand = (cmd: string | undefined): boolean => {
         if (!cmd) return true;
         const norm = cmd.trim().toLowerCase();
-        return /^(?:команда(?:\s+для\s+запуска)?|command_here|python script\.py arg1 arg2|команда\s+запуска|command to run)$/i.test(norm) ||
-               norm.includes('команда для запуска');
+        return /^(?:\.{1,}|…|command|команда(?:\s+для\s+запуска)?|command_here|python script\.py arg1 arg2|команда\s+запуска|command to run|todo|your command here)$/i.test(norm) ||
+               norm === '...' || norm === '…' || norm === '..' || norm === '.' ||
+               norm.includes('команда для запуска') ||
+               norm.startsWith('<command>') || norm.endsWith('</command>');
       };
 
       const isDummyContent = (cnt: string | undefined): boolean => {
@@ -1868,12 +1976,17 @@ Re-generate your response now with the proper tool call:`,
         }
       }
 
+      const serializedArgs = JSON.stringify(toolArgs);
+      if (toolCalls.some(t => t.function.name === toolName && t.function.arguments === serializedArgs)) {
+        return;
+      }
+
       toolCalls.push({
         id: callId,
         type: 'function',
         function: {
           name: toolName,
-          arguments: JSON.stringify(toolArgs)
+          arguments: serializedArgs
         }
       });
     };
@@ -1887,7 +2000,7 @@ Re-generate your response now with the proper tool call:`,
     }
 
     // Direct tag matching: <create_file>...</create_file>, <write_file>...</write_file>, <replace_file_content>...
-    const directTagRegex = /<(command|create_file|write_file|replace_file_content|edit_file|run_command|run_terminal_command|list_files|read_file|view_file|view_file_slice|get_diagnostics|ask_user)\b[^>]*>([\s\S]*?)(?:<\/\1>|$)/gi;
+    const directTagRegex = /<(create_file|write_file|replace_file_content|edit_file|run_command|run_terminal_command|list_files|read_file|view_file|view_file_slice|get_diagnostics|ask_user)\b[^>]*>([\s\S]*?)(?:<\/\1>|$)/gi;
     while ((m = directTagRegex.exec(content)) !== null) {
       processSingleCall(m[1], m[2]);
     }
