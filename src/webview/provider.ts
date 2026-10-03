@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
+import * as os from 'os';
 import { AgentEngine } from '../agent/engine';
 import { SessionManager } from '../agent/sessionManager';
 import { DeepSeekClient } from '../client/deepseekClient';
@@ -447,6 +449,10 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
           logger.show();
           break;
 
+        case 'checkForUpdates':
+          await this.checkForUpdates(false);
+          break;
+
         case 'openExternal':
           if (data.url) {
             vscode.env.openExternal(vscode.Uri.parse(data.url));
@@ -457,6 +463,105 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
       console.error('Error handling webview message:', err);
     }
   });
+  }
+
+  private static readonly UPDATE_URL = 'https://api.thenck4.ru/api/vsix/download/latest';
+  private autoUpdateChecked = false;
+  private updateInProgress = false;
+
+  private static compareVersions(a: string, b: string): number {
+    const pa = a.split('.').map(n => parseInt(n, 10) || 0);
+    const pb = b.split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d !== 0) return d > 0 ? 1 : -1;
+    }
+    return 0;
+  }
+
+  private postUpdateStatus(payload: { status: string; version?: string; error?: string }) {
+    this.view?.webview.postMessage({ type: 'updateStatus', ...payload });
+  }
+
+  private async checkForUpdates(silent: boolean): Promise<void> {
+    if (this.updateInProgress) return;
+    this.updateInProgress = true;
+    const current: string = this.extensionContext.extension.packageJSON.version || '0.0.0';
+    let tmpFile = '';
+    try {
+      const result = await new Promise<{ version: string; file?: string }>((resolve, reject) => {
+        const req = https.get(DeepSeekViewProvider.UPDATE_URL, { timeout: 20000 }, (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            reject(new Error('HTTP ' + res.statusCode));
+            return;
+          }
+          const version = String(res.headers['x-vsix-version'] || '');
+          const sha = String(res.headers['x-vsix-sha256'] || '').toLowerCase();
+          if (!version) {
+            res.resume();
+            reject(new Error('No version header'));
+            return;
+          }
+          if (DeepSeekViewProvider.compareVersions(version, current) <= 0) {
+            req.destroy();
+            resolve({ version });
+            return;
+          }
+          if (silent) {
+            logger.log('Update', `Auto-update: downloading v${version}`);
+          }
+          this.postUpdateStatus({ status: 'downloading', version });
+          const file = path.join(os.tmpdir(), `deepcode-${version}.vsix`);
+          const out = fs.createWriteStream(file);
+          const crypto = require('crypto') as typeof import('crypto');
+          const hash = crypto.createHash('sha256');
+          res.on('data', (chunk: Buffer) => hash.update(chunk));
+          res.pipe(out);
+          out.on('finish', () => {
+            out.close();
+            if (sha && hash.digest('hex') !== sha) {
+              try { fs.unlinkSync(file); } catch { /* ignore */ }
+              reject(new Error('Checksum mismatch'));
+              return;
+            }
+            resolve({ version, file });
+          });
+          out.on('error', reject);
+          res.on('error', reject);
+        });
+        req.on('timeout', () => req.destroy(new Error('Timeout')));
+        req.on('error', (e) => {
+          if ((e as NodeJS.ErrnoException).code === 'ECONNRESET' && req.destroyed) return;
+          reject(e);
+        });
+      });
+
+      if (!result.file) {
+        this.postUpdateStatus({ status: 'up-to-date', version: result.version });
+        return;
+      }
+      tmpFile = result.file;
+      this.postUpdateStatus({ status: 'installing', version: result.version });
+      await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(tmpFile));
+      this.postUpdateStatus({ status: 'success', version: result.version });
+      logger.log('Update', `Installed v${result.version}`);
+      vscode.window.showInformationMessage(
+        `DeepCode updated to v${result.version}. Reload window to apply.`,
+        'Reload'
+      ).then(choice => {
+        if (choice === 'Reload') vscode.commands.executeCommand('workbench.action.reloadWindow');
+      });
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      logger.log('Update', `Update failed: ${message}`);
+      this.postUpdateStatus({ status: 'error', error: message });
+    } finally {
+      this.updateInProgress = false;
+      if (tmpFile) {
+        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+      }
+    }
   }
 
   private sendProjectsHierarchy() {
@@ -519,6 +624,18 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
       baseUrl,
       tokenUsage
     });
+
+    this.view.webview.postMessage({
+      type: 'extensionVersion',
+      version: this.extensionContext.extension.packageJSON.version
+    });
+
+    if (!this.autoUpdateChecked) {
+      this.autoUpdateChecked = true;
+      if (this.sessionManager.getDefaultSettings().autoUpdate) {
+        void this.checkForUpdates(true);
+      }
+    }
   }
 
   private async getOrPromptApiKey(): Promise<string | undefined> {

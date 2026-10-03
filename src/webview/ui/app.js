@@ -115,6 +115,16 @@ const I18N = {
     tokensUnit: 'tokens',
     defDebugModeLabel: 'Debug Mode',
     defAutoOpenFileLabel: 'Auto-open modified files',
+    defAutoUpdateLabel: 'Auto Update',
+    lblCheckUpdate: 'Check for Updates',
+    lblCurrentVersion: 'Current Version:',
+    updateChecking: 'Checking...',
+    updateAvailable: 'Update available: v{version}',
+    updateDownloading: 'Downloading v{version}...',
+    updateInstalling: 'Installing...',
+    updateSuccess: 'Updated to v{version}! Restart to apply.',
+    updateUpToDate: 'You are up to date ✓',
+    updateError: 'Update check failed',
     debugInfoTitle: 'Debug Info',
     errorCodeLabel: 'Code:',
     copyRawError: 'Copy Error',
@@ -238,6 +248,16 @@ const I18N = {
     tokensUnit: 'токенов',
     defDebugModeLabel: 'Режим отладки',
     defAutoOpenFileLabel: 'Автоматически открывать измененные файлы',
+    defAutoUpdateLabel: 'Авто-обновление',
+    lblCheckUpdate: 'Проверить обновления',
+    lblCurrentVersion: 'Текущая версия:',
+    updateChecking: 'Проверка...',
+    updateAvailable: 'Доступно обновление: v{version}',
+    updateDownloading: 'Скачивание v{version}...',
+    updateInstalling: 'Установка...',
+    updateSuccess: 'Обновлено до v{version}! Перезапустите для применения.',
+    updateUpToDate: 'Вы используете актуальную версию ✓',
+    updateError: 'Ошибка проверки обновлений',
     debugInfoTitle: 'Отладочная информация',
     errorCodeLabel: 'Код:',
     copyRawError: 'Копировать ошибку',
@@ -398,6 +418,8 @@ function applyLanguage(lang) {
     ['lblDefSandbox', 'lblDefSandbox'],
     ['lblDefDebugMode', 'defDebugModeLabel'],
     ['lblDefAutoOpenFile', 'defAutoOpenFileLabel'],
+    ['lblDefAutoUpdate', 'defAutoUpdateLabel'],
+    ['lblCheckUpdate', 'lblCheckUpdate'],
     ['lblTimeoutsSec', 'lblTimeoutsSec'],
     ['lblRequestDelay', 'lblRequestDelay'],
     ['lblPacingDelay', 'lblPacingDelay'],
@@ -621,6 +643,10 @@ const defPlanMode = document.getElementById('defPlanMode');
 const defSandboxMode = document.getElementById('defSandboxMode');
 const defDebugMode = document.getElementById('defDebugMode');
 const defAutoOpenFile = document.getElementById('defAutoOpenFile');
+const defAutoUpdate = document.getElementById('defAutoUpdate');
+const checkUpdateBtn = document.getElementById('checkUpdateBtn');
+const updateStatusText = document.getElementById('updateStatusText');
+const currentVersionValue = document.getElementById('currentVersionValue');
 const devPacingDelayInput = document.getElementById('devPacingDelayInput');
 const devRequestDelayInput = document.getElementById('devRequestDelayInput');
 const devConnectTimeoutInput = document.getElementById('devConnectTimeoutInput');
@@ -1050,6 +1076,17 @@ if (openLogsBtn) {
   });
 }
 
+if (checkUpdateBtn) {
+  checkUpdateBtn.addEventListener('click', () => {
+    if (updateStatusText) {
+      updateStatusText.textContent = t('updateChecking');
+      updateStatusText.style.color = 'var(--text-secondary)';
+    }
+    checkUpdateBtn.disabled = true;
+    vscode.postMessage({ command: 'checkForUpdates' });
+  });
+}
+
 if (defDeadMode) {
   defDeadMode.addEventListener('change', () => {
     modeStates.deadMode = defDeadMode.checked;
@@ -1318,6 +1355,7 @@ function saveCredentials(key, url, model) {
     sandboxMode: defSandboxMode ? defSandboxMode.value : 'local',
     debugMode: defDebugMode ? defDebugMode.checked : false,
     autoOpenModifiedFiles: defAutoOpenFile ? defAutoOpenFile.checked : false,
+    autoUpdate: defAutoUpdate ? defAutoUpdate.checked : false,
     pacingDelayMs: devPacingDelayInput ? (parseInt(devPacingDelayInput.value, 10) || 1500) : 1500,
     requestDelayMs: devRequestDelayInput ? (parseInt(devRequestDelayInput.value, 10) || 0) : 0,
     connectTimeoutSec: devConnectTimeoutInput ? (parseInt(devConnectTimeoutInput.value, 10) || 75) : 75,
@@ -2732,6 +2770,7 @@ window.addEventListener('message', (event) => {
           if (defSandboxMode) defSandboxMode.value = msg.defaults.sandboxMode || 'local';
           if (defDebugMode) defDebugMode.checked = Boolean(msg.defaults.debugMode);
           if (defAutoOpenFile) defAutoOpenFile.checked = Boolean(msg.defaults.autoOpenModifiedFiles);
+          if (defAutoUpdate) defAutoUpdate.checked = Boolean(msg.defaults.autoUpdate);
           if (devPacingDelayInput && msg.defaults.pacingDelayMs !== undefined) devPacingDelayInput.value = msg.defaults.pacingDelayMs;
           if (devRequestDelayInput && msg.defaults.requestDelayMs !== undefined) devRequestDelayInput.value = msg.defaults.requestDelayMs;
           if (devConnectTimeoutInput && msg.defaults.connectTimeoutSec !== undefined) devConnectTimeoutInput.value = msg.defaults.connectTimeoutSec;
@@ -2754,6 +2793,39 @@ window.addEventListener('message', (event) => {
           console.log('[DeepCode Log]', msg.entry);
         }
         break;
+
+      case 'updateStatus': {
+        if (checkUpdateBtn) checkUpdateBtn.disabled = false;
+        if (updateStatusText) {
+          if (msg.status === 'up-to-date') {
+            updateStatusText.textContent = t('updateUpToDate');
+            updateStatusText.style.color = '#4caf50';
+          } else if (msg.status === 'available') {
+            updateStatusText.textContent = t('updateAvailable').replace('{version}', msg.version || '?');
+            updateStatusText.style.color = '#ff9800';
+          } else if (msg.status === 'downloading') {
+            updateStatusText.textContent = t('updateDownloading').replace('{version}', msg.version || '?');
+            updateStatusText.style.color = 'var(--text-secondary)';
+          } else if (msg.status === 'installing') {
+            updateStatusText.textContent = t('updateInstalling');
+            updateStatusText.style.color = 'var(--text-secondary)';
+          } else if (msg.status === 'success') {
+            updateStatusText.textContent = t('updateSuccess').replace('{version}', msg.version || '?');
+            updateStatusText.style.color = '#4caf50';
+          } else if (msg.status === 'error') {
+            updateStatusText.textContent = t('updateError') + (msg.error ? ': ' + msg.error : '');
+            updateStatusText.style.color = '#f44336';
+          }
+        }
+        break;
+      }
+
+      case 'extensionVersion': {
+        if (currentVersionValue) {
+          currentVersionValue.textContent = msg.version || '?';
+        }
+        break;
+      }
 
       case 'initSession':
         turnModifiedFiles.clear();
@@ -2786,6 +2858,7 @@ window.addEventListener('message', (event) => {
         if (defSandboxMode) defSandboxMode.value = msg.defaults.sandboxMode || 'local';
         if (defDebugMode) defDebugMode.checked = Boolean(msg.defaults.debugMode);
         if (defAutoOpenFile) defAutoOpenFile.checked = Boolean(msg.defaults.autoOpenModifiedFiles);
+        if (defAutoUpdate) defAutoUpdate.checked = Boolean(msg.defaults.autoUpdate);
         if (devPacingDelayInput && msg.defaults.pacingDelayMs !== undefined) devPacingDelayInput.value = msg.defaults.pacingDelayMs;
         if (devRequestDelayInput && msg.defaults.requestDelayMs !== undefined) devRequestDelayInput.value = msg.defaults.requestDelayMs;
         if (devConnectTimeoutInput && msg.defaults.connectTimeoutSec !== undefined) devConnectTimeoutInput.value = msg.defaults.connectTimeoutSec;
