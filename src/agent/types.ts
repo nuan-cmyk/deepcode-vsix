@@ -59,6 +59,14 @@ export interface DefaultChatSettings {
   compactThresholdTokens?: number;
   cyrillicCharsPerToken?: number;
   latinCharsPerToken?: number;
+  removeOldContextFromFile?: boolean;
+  hideOldContext?: boolean;
+}
+
+export interface CompactMilestone {
+  compactIndex: number;
+  atMessageId: string;
+  timestamp: number;
 }
 
 export interface ChatSession {
@@ -86,6 +94,7 @@ export interface ChatSession {
   promptTokens?: number;
   completionTokens?: number;
   userTokens?: number;
+  toolTokens?: number;
   lastCompactTimestamp?: number;
   compactedSummary?: string;
   compactedAtMessageId?: string;
@@ -93,7 +102,15 @@ export interface ChatSession {
   compactedBlocks?: string[];
   rawTokensProcessedTotal?: number;
   cumulativeTokensSpent?: number;
+  cumulativeUserTokens?: number;
+  cumulativeLlmTokens?: number;
+  cumulativeToolTokens?: number;
+  purgedUserTokens?: number;
+  purgedLlmTokens?: number;
+  purgedToolTokens?: number;
   epochSummaries?: string[];
+  compactMilestones?: CompactMilestone[];
+  historyTruncatedBeforeMessageId?: string;
 }
 
 export interface ToolDefinition {

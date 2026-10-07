@@ -341,8 +341,13 @@ export class DeepSeekClient {
       return msg;
     });
 
+    let targetModel = options.model || 'deepseek-chat';
+    if (options.deadMode && !targetModel.endsWith('-dead')) {
+      targetModel = `${targetModel}-dead`;
+    }
+
     const payload: any = {
-      model: options.model || 'deepseek-chat',
+      model: targetModel,
       stream: true,
       stream_options: { include_usage: true },
       thinking: options.thinking ?? true,
@@ -456,24 +461,30 @@ export class DeepSeekClient {
         }
       }
 
-      logger.log('API', `POST ${url} (model: ${payload.model}, thinking: ${payload.thinking}, messages: ${payload.messages.length})`);
+      const requestHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${cleanKey}`,
+        'User-Agent': DEFAULT_USER_AGENT
+      };
+
+      if (options.deadMode) {
+        requestHeaders['x-dead-mode'] = 'true';
+      }
+
+      logger.log('API', `POST ${url} (model: ${payload.model}, thinking: ${payload.thinking}, deadMode: ${Boolean(options.deadMode)}, messages: ${payload.messages.length})`);
 
       let response = await fetchWithTimeout(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${cleanKey}`,
-          'User-Agent': DEFAULT_USER_AGENT
-        },
+        headers: requestHeaders,
         body: JSON.stringify(payload),
         signal
       }, this.connectTimeoutMs);
 
       logger.log('API', `HTTP ${response.status} ${response.statusText} in ${Date.now() - requestStartTime}ms`);
 
-      // If server returned 502/404/400/401 when conversation_id was set, the server session might have expired.
-      // Reset conversation_id and retry with full message history so execution never halts.
-      if (!response.ok && payload.conversation_id && (response.status === 502 || response.status === 404 || response.status === 400 || response.status === 401) && !signal?.aborted) {
+      // If server returned 404/400/401 when conversation_id was set, the server session might have expired.
+      // (502/503/504 are gateway errors, not session expirations, so we do not discard conversation_id on them)
+      if (!response.ok && payload.conversation_id && (response.status === 404 || response.status === 400 || response.status === 401) && !signal?.aborted) {
         callbacks.onStatus?.('Сессия на сервере обновлена, повторная отправка полного контекста...');
         delete payload.conversation_id;
         payload.messages = formattedMessages;
@@ -482,36 +493,28 @@ export class DeepSeekClient {
         }
         response = await fetchWithTimeout(url, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${cleanKey}`,
-            'User-Agent': DEFAULT_USER_AGENT
-          },
+          headers: requestHeaders,
           body: JSON.stringify(payload),
           signal
         }, this.connectTimeoutMs);
       }
 
-      // Transient 429 / 502 / 503 / 504 retry
+      // Transient 429 / 502 / 503 / 504 quick retry (strictly capped to 2-3s max, never 60s)
       if (!response.ok && (response.status === 429 || response.status === 502 || response.status === 503 || response.status === 504) && !signal?.aborted) {
-        let retryDelaySec = 3;
+        let retryDelaySec = response.status === 429 ? 3 : 2;
         const retryAfterHeader = response.headers.get('Retry-After');
         if (retryAfterHeader) {
           const parsedSec = parseInt(retryAfterHeader, 10);
           if (!isNaN(parsedSec) && parsedSec > 0) {
-            retryDelaySec = parsedSec;
+            retryDelaySec = Math.min(parsedSec, 3);
           }
         }
-        callbacks.onStatus?.(response.status === 429 ? `Лимит запросов (429). Ожидание ${retryDelaySec} сек...` : `Шлюз вернул ${response.status}. Повторная попытка через ${retryDelaySec} сек...`);
+        callbacks.onStatus?.(response.status === 429 ? `Лимит запросов (429). Ожидание ${retryDelaySec} сек...` : `Шлюз вернул ${response.status}. Повторная проверка через ${retryDelaySec} сек...`);
         await new Promise(r => setTimeout(r, retryDelaySec * 1000));
         if (!signal?.aborted) {
           response = await fetchWithTimeout(url, {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${cleanKey}`,
-              'User-Agent': DEFAULT_USER_AGENT
-            },
+            headers: requestHeaders,
             body: JSON.stringify(payload),
             signal
           }, this.connectTimeoutMs);
@@ -535,9 +538,11 @@ export class DeepSeekClient {
 
         if (!cleanErrMsg) {
           if (errBody.includes('<html') || errBody.includes('502: Bad gateway') || response.status === 502) {
-            cleanErrMsg = `Прокси-сервер (${url}) временно недоступен (502 Bad Gateway). Бэкенд перезагружается или перегружен Cloudflare. Пожалуйста, повторите запрос через пару секунд.`;
+            cleanErrMsg = `Сервер временно недоступен (502 Bad Gateway). Прокси или бэкенд перезагружается. Пожалуйста, повторите запрос через пару секунд.`;
+          } else if (response.status === 503) {
+            cleanErrMsg = `Сервис временно недоступен (503 Service Unavailable). Пожалуйста, повторите запрос позже.`;
           } else if (response.status === 504) {
-            cleanErrMsg = `Таймаут шлюза (504 Gateway Timeout). Сервер не успел обработать запрос вовремя.`;
+            cleanErrMsg = `Таймаут шлюза (504 Gateway Timeout). Сервер не успел ответить вовремя.`;
           } else {
             cleanErrMsg = `API error (${response.status}): ${response.statusText || errBody.slice(0, 200)}`;
           }
@@ -818,11 +823,7 @@ export class DeepSeekClient {
         try {
           const fallbackResp = await fetchWithTimeout(url, {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${cleanKey}`,
-              'User-Agent': DEFAULT_USER_AGENT
-            },
+            headers: requestHeaders,
             body: JSON.stringify({ ...payload, stream: false }),
             signal
           }, 20000);

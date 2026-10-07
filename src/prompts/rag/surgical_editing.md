@@ -2,9 +2,9 @@
 
 To prevent inadvertent bugs, regression, or accidental deletion of working code:
 
-1. **Iron Rule: Never Overwrite Existing Files with `create_file`**:
-   - `create_file` is strictly reserved for creating new files that do not exist yet.
-   - For all existing files, you MUST use `edit_file` (or `replace_file_content`).
+1. **Rule: Prefer Surgical Edits over Full File Rewrites**:
+   - For existing files, always prefer `edit_file` (or `replace_file_content`) to modify specific functions or sections safely.
+   - If an existing file is heavily damaged or genuinely needs a 100% full rewrite, you must explicitly supply `<overwrite>true</overwrite>` with `create_file`. Without `<overwrite>true</overwrite>`, existing files are protected against accidental overwrites.
 
 2. **Exact Substring Matching**:
    - `edit_file` takes `<search>` and `<replace>`.

@@ -338,6 +338,13 @@ export class ToolExecutor {
         }
         case 'replace_file_content':
         case 'edit_file':
+          if (args.hasExplicitReplace === false && (args.replacementContent === '' || args.replacementContent === undefined) && !args.replace && !args.replacement) {
+            toolResult = {
+              output: `Error: <replace> tag was missing in edit_file call. If you intended to delete code, specify an empty <replace></replace> explicitly.`,
+              error: true
+            };
+            break;
+          }
           toolResult = await this.replaceFileContent(
             args.path,
             args.targetContent ?? args.search ?? args.target ?? '',
@@ -346,7 +353,7 @@ export class ToolExecutor {
           break;
         case 'write_file':
         case 'create_file': {
-          const overwrite = args.overwrite !== undefined ? Boolean(args.overwrite) : false;
+          const overwrite = args.overwrite === true || args.overwrite === 'true' || args.overwrite === 1 || args.overwrite === '1';
           toolResult = await this.writeFile(args.path, args.content || '', overwrite);
           break;
         }
@@ -453,10 +460,10 @@ export class ToolExecutor {
       }
     }
 
-    // Tier 3: Trimmed block match
+    // Tier 3: Trimmed block match (only for non-trivial blocks to avoid short token accidental matches)
     if (firstIndex === -1) {
       const trimmedTarget = normalizedTarget.trim();
-      if (trimmedTarget && normalizedContent.indexOf(trimmedTarget) !== -1) {
+      if (trimmedTarget && trimmedTarget.length >= 10 && normalizedContent.indexOf(trimmedTarget) !== -1) {
         normalizedTarget = trimmedTarget;
         firstIndex = normalizedContent.indexOf(normalizedTarget);
       }
@@ -471,8 +478,11 @@ export class ToolExecutor {
         };
       }
 
-      const updated = normalizedContent.replace(normalizedTarget, normalizedReplacement);
-      await fs.promises.writeFile(fullPath, updated, 'utf-8');
+      // Exact substring replacement by slicing (NEVER use String.replace because it interprets $ patterns and regex escapes!)
+      const updated = normalizedContent.slice(0, firstIndex) + normalizedReplacement + normalizedContent.slice(firstIndex + normalizedTarget.length);
+      const isCRLF = content.includes('\r\n');
+      const finalContent = isCRLF ? updated.replace(/\r?\n/g, '\r\n') : updated;
+      await fs.promises.writeFile(fullPath, finalContent, 'utf-8');
 
       const searchLines = normalizedTarget.split('\n').length;
       const repLines = normalizedReplacement.split('\n').length;
@@ -531,7 +541,9 @@ export class ToolExecutor {
         const before = fileLines.slice(0, match.startLine);
         const after = fileLines.slice(match.endLine + 1);
         const updated = [...before, adjustedRep, ...after].join('\n');
-        await fs.promises.writeFile(fullPath, updated, 'utf-8');
+        const isCRLF = content.includes('\r\n');
+        const finalContent = isCRLF ? updated.replace(/\r?\n/g, '\r\n') : updated;
+        await fs.promises.writeFile(fullPath, finalContent, 'utf-8');
 
         const sCount = match.endLine - match.startLine + 1;
         const rCount = adjustedRep.split('\n').length;
@@ -579,7 +591,7 @@ export class ToolExecutor {
       const stats = await fs.promises.stat(fullPath);
       if (stats.size > 0 && !overwrite) {
         return {
-          output: `Error: File '${filePath}' already exists (${stats.size} bytes)! To preserve existing code, you MUST use surgical editing with <tool_call name="edit_file"><path>${filePath}</path><search>...</search><replace>...</replace></tool_call>. Overwriting existing files entirely with create_file is forbidden.`,
+          output: `Error: File '${filePath}' already exists (${stats.size} bytes). To preserve existing code, please use surgical editing with <tool_call name="edit_file"><path>${filePath}</path><search>...</search><replace>...</replace></tool_call>.\nIf you intentionally want to rewrite or overwrite this entire file, specify <overwrite>true</overwrite>: <tool_call name="create_file"><path>${filePath}</path><content>...</content><overwrite>true</overwrite></tool_call>.`,
           error: true
         };
       }

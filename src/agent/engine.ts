@@ -39,8 +39,24 @@ export interface AgentCallbacks {
 
 export const COMPACT_THRESHOLD = 80000;
 
+export function isGatewayUnavailableError(err: any): boolean {
+  if (!err) return false;
+  const msg = (typeof err === 'string' ? err : (err.message || String(err))).toLowerCase();
+  return (
+    msg.includes('502') ||
+    msg.includes('503') ||
+    msg.includes('504') ||
+    msg.includes('bad gateway') ||
+    msg.includes('gateway timeout') ||
+    msg.includes('сервер временно недоступен') ||
+    msg.includes('временно недоступен (502') ||
+    msg.includes('прокси-сервер')
+  );
+}
+
 function isConnectionClosedEmptyError(err: any): boolean {
   if (!err) return false;
+  if (isGatewayUnavailableError(err)) return false;
   const msg = (typeof err === 'string' ? err : (err.message || String(err))).toLowerCase();
   return (
     msg.includes('empty stream') ||
@@ -60,15 +76,8 @@ function isConnectionClosedEmptyError(err: any): boolean {
     msg.includes('econnreset') ||
     msg.includes('etimedout') ||
     msg.includes('socket hang up') ||
-    msg.includes('502') ||
-    msg.includes('503') ||
-    msg.includes('504') ||
-    msg.includes('bad gateway') ||
-    msg.includes('gateway timeout') ||
     msg.includes('failed to fetch') ||
     msg.includes('fetch failed') ||
-    msg.includes('temporarily unavailable') ||
-    msg.includes('server is temporarily unavailable') ||
     msg.includes('deepseek hint error') ||
     msg.includes('service unavailable') ||
     msg.includes('429') ||
@@ -489,7 +498,15 @@ export class AgentEngine {
         const toolsForRun = session.agentMode ? TOOL_DEFINITIONS : undefined;
         let turnUsage = countConversationTokens(messagesToSend, toolsForRun, DEFAULT_CONTEXT_LIMIT);
         turnUsage.lastCompactTimestamp = session.lastCompactTimestamp;
-        this.sessionManager.updateTokens(turnUsage.totalTokens, turnUsage.promptTokens, turnUsage.completionTokens, turnUsage.userTokens);
+        this.sessionManager.updateTokens(turnUsage.totalTokens, turnUsage.promptTokens, turnUsage.completionTokens, turnUsage.userTokens, undefined, turnUsage.toolTokens);
+        const preLifetime = this.sessionManager.getLifetimeTokenUsage(session);
+        turnUsage.cumulativeTokensSpent = preLifetime.cumulativeTokensSpent;
+        turnUsage.userTokens = preLifetime.userTokens;
+        turnUsage.llmTokens = preLifetime.llmTokens;
+        turnUsage.toolTokens = preLifetime.toolTokens;
+        turnUsage.cumulativeUserTokens = preLifetime.userTokens;
+        turnUsage.cumulativeLlmTokens = preLifetime.llmTokens;
+        turnUsage.cumulativeToolTokens = preLifetime.toolTokens;
         callbacks.onTokenUsage?.(turnUsage);
 
         callbacks.onStatus(session.thinking ? 'Reasoning...' : 'Generating response...');
@@ -643,19 +660,26 @@ export class AgentEngine {
                       }
                     }
                     const systemPromptTokens = Math.max(0, u.prompt_tokens - userTokens);
+                    this.sessionManager.updateTokens(u.total_tokens, systemPromptTokens > 0 ? systemPromptTokens : u.prompt_tokens, u.completion_tokens, userTokens);
+                    const streamLifetime = this.sessionManager.getLifetimeTokenUsage(session);
 
                     turnUsage = {
-                      promptTokens: systemPromptTokens > 0 ? systemPromptTokens : u.prompt_tokens,
+                      promptTokens: streamLifetime.promptTokens,
                       completionTokens: u.completion_tokens,
                       totalTokens: u.total_tokens,
                       maxTokens,
                       percent,
-                      userTokens,
-                      systemTokens: systemPromptTokens,
+                      userTokens: streamLifetime.userTokens,
+                      llmTokens: streamLifetime.llmTokens,
+                      toolTokens: streamLifetime.toolTokens,
+                      systemTokens: streamLifetime.promptTokens,
                       contextTokens: u.total_tokens,
-                      lastCompactTimestamp: session.lastCompactTimestamp
+                      lastCompactTimestamp: session.lastCompactTimestamp,
+                      cumulativeTokensSpent: streamLifetime.cumulativeTokensSpent,
+                      cumulativeUserTokens: streamLifetime.userTokens,
+                      cumulativeLlmTokens: streamLifetime.llmTokens,
+                      cumulativeToolTokens: streamLifetime.toolTokens
                     };
-                    this.sessionManager.updateTokens(u.total_tokens, turnUsage.promptTokens, u.completion_tokens, userTokens);
                     callbacks.onTokenUsage?.(turnUsage);
                   },
                   onError: (err) => {
@@ -679,6 +703,11 @@ export class AgentEngine {
 
           if (streamError) {
             if (this.abortController?.signal?.aborted || streamError.name === 'AbortError' || streamError.message === 'Operation cancelled by user') {
+              throw streamError;
+            }
+
+            if (isGatewayUnavailableError(streamError)) {
+              // Immediately rethrow gateway errors (502/503/504) so stream stops cleanly and user sees the error card
               throw streamError;
             }
 
@@ -751,7 +780,15 @@ export class AgentEngine {
             { id: `temp_${Date.now()}`, role: 'assistant', content: currentAssistantContent, reasoningContent: currentReasoningContent, timestamp: Date.now() }
           ], toolsForRun, DEFAULT_CONTEXT_LIMIT);
           compTokens.lastCompactTimestamp = session.lastCompactTimestamp;
-          this.sessionManager.updateTokens(compTokens.totalTokens, compTokens.promptTokens, compTokens.completionTokens, compTokens.userTokens);
+          this.sessionManager.updateTokens(compTokens.totalTokens, compTokens.promptTokens, compTokens.completionTokens, compTokens.userTokens, undefined, compTokens.toolTokens);
+          const fallbackLifetime = this.sessionManager.getLifetimeTokenUsage(session);
+          compTokens.cumulativeTokensSpent = fallbackLifetime.cumulativeTokensSpent;
+          compTokens.userTokens = fallbackLifetime.userTokens;
+          compTokens.llmTokens = fallbackLifetime.llmTokens;
+          compTokens.toolTokens = fallbackLifetime.toolTokens;
+          compTokens.cumulativeUserTokens = fallbackLifetime.userTokens;
+          compTokens.cumulativeLlmTokens = fallbackLifetime.llmTokens;
+          compTokens.cumulativeToolTokens = fallbackLifetime.toolTokens;
           callbacks.onTokenUsage?.(compTokens);
         }
 
@@ -1829,10 +1866,27 @@ Re-generate your response now with the proper tool call:`,
         if (toolName === 'write_file') {
           const pm = inner.match(/<(?:path|file|filepath)>([\s\S]*?)<\/(?:path|file|filepath)>/i);
           const cm = inner.match(/<content>([\s\S]*?)<\/content>/i);
-          const om = inner.match(/<overwrite>(true|false)<\/overwrite>/i);
+          const om = inner.match(/<overwrite\b[^>]*>\s*(true|false)\s*<\/overwrite>/i) || inner.match(/<overwrite\s+value=["'](true|false)["']/i);
           const pathVal = dsmlParams.path || dsmlParams.file || dsmlParams.filepath || (pm ? pm[1].trim() : '');
-          const contentVal = dsmlParams.content !== undefined ? dsmlParams.content : (cm ? cm[1] : inner.replace(/<(?:path|file|filepath)>[\s\S]*?<\/(?:path|file|filepath)>/i, '').trim());
-          const overwriteVal = dsmlParams.overwrite !== undefined ? dsmlParams.overwrite.toLowerCase() === 'true' : (om ? om[1].toLowerCase() === 'true' : false);
+          
+          let contentVal = dsmlParams.content !== undefined ? dsmlParams.content : (cm ? cm[1] : undefined);
+          if (contentVal === undefined) {
+            const cStartMatch = inner.match(/<content\b[^>]*>/i);
+            if (cStartMatch && cStartMatch.index !== undefined) {
+              const afterContentTag = inner.slice(cStartMatch.index + cStartMatch[0].length);
+              const closeTagMatch = afterContentTag.match(/<\/(?:content|tool_call|function_call|call|tool)\b[^>]*>/i);
+              contentVal = closeTagMatch && closeTagMatch.index !== undefined
+                ? afterContentTag.slice(0, closeTagMatch.index)
+                : afterContentTag;
+            } else {
+              contentVal = inner.replace(/<(?:path|file|filepath)>[\s\S]*?<\/(?:path|file|filepath)>/i, '').replace(/<overwrite\b[^>]*>[\s\S]*?<\/overwrite>/i, '').trim();
+            }
+          }
+
+          const overwriteVal = dsmlParams.overwrite !== undefined
+            ? (dsmlParams.overwrite.toLowerCase() === 'true' || dsmlParams.overwrite === '1')
+            : (om ? om[1].toLowerCase() === 'true' : false);
+
           toolArgs = {
             path: pathVal,
             content: contentVal,
@@ -1840,12 +1894,51 @@ Re-generate your response now with the proper tool call:`,
           };
         } else if (toolName === 'replace_file_content') {
           const pm = inner.match(/<(?:path|file|filepath)>([\s\S]*?)<\/(?:path|file|filepath)>/i);
-          const sm = inner.match(/<(?:search|target|targetContent|original|before)>([\s\S]*?)<\/(?:search|target|targetContent|original|before)>/i);
-          const rm = inner.match(/<(?:replace|replacement|replacementContent|after)>([\s\S]*?)<\/(?:replace|replacement|replacementContent|after)>/i);
+          const pathVal = dsmlParams.path || dsmlParams.file || dsmlParams.filepath || (pm ? pm[1].trim() : '');
+
+          let targetVal = dsmlParams.targetContent || dsmlParams.search || dsmlParams.target || dsmlParams.original || dsmlParams.before || '';
+          let replacementVal = dsmlParams.replacementContent || dsmlParams.replace || dsmlParams.replacement || dsmlParams.after || '';
+          let hasExplicitReplace = dsmlParams.replacementContent !== undefined || dsmlParams.replace !== undefined || dsmlParams.replacement !== undefined || dsmlParams.after !== undefined;
+
+          // Robust tag boundary parsing for XML tags
+          const searchStartRegex = /<(?:search|target|targetContent|original|before)\b[^>]*>/i;
+          const replaceStartRegex = /<(?:replace|replacement|replacementContent|after)\b[^>]*>/i;
+
+          const sMatch = inner.match(searchStartRegex);
+          const rMatch = inner.match(replaceStartRegex);
+
+          if (!targetVal && sMatch && sMatch.index !== undefined) {
+            const sStart = sMatch.index + sMatch[0].length;
+            let sEnd = -1;
+            if (rMatch && rMatch.index !== undefined && rMatch.index > sStart) {
+              const textBeforeReplace = inner.slice(sStart, rMatch.index);
+              const closeSMatch = textBeforeReplace.match(/<\/(?:search|target|targetContent|original|before)\b[^>]*>/i);
+              sEnd = closeSMatch && closeSMatch.index !== undefined ? sStart + closeSMatch.index : rMatch.index;
+            } else {
+              const closeSMatch = inner.slice(sStart).match(/<\/(?:search|target|targetContent|original|before)\b[^>]*>/i);
+              sEnd = closeSMatch && closeSMatch.index !== undefined ? sStart + closeSMatch.index : inner.length;
+            }
+            targetVal = inner.slice(sStart, sEnd);
+          }
+
+          if (rMatch && rMatch.index !== undefined) {
+            hasExplicitReplace = true;
+            if (!replacementVal) {
+              const rStart = rMatch.index + rMatch[0].length;
+              const textAfterReplace = inner.slice(rStart);
+              // Handle proper </replace>, but ALSO handle frequent model hallucinations like </search>, </tool_call>, or EOF
+              const closeRMatch = textAfterReplace.match(/<\/(?:replace|replacement|replacementContent|after|search|tool_call|function_call|call|tool)\b[^>]*>/i);
+              replacementVal = closeRMatch && closeRMatch.index !== undefined
+                ? textAfterReplace.slice(0, closeRMatch.index)
+                : textAfterReplace;
+            }
+          }
+
           toolArgs = {
-            path: dsmlParams.path || dsmlParams.file || dsmlParams.filepath || (pm ? pm[1].trim() : ''),
-            targetContent: dsmlParams.targetContent || dsmlParams.search || dsmlParams.target || dsmlParams.original || (sm ? sm[1] : ''),
-            replacementContent: dsmlParams.replacementContent || dsmlParams.replace || dsmlParams.replacement || dsmlParams.after || (rm ? rm[1] : '')
+            path: pathVal,
+            targetContent: targetVal,
+            replacementContent: replacementVal,
+            hasExplicitReplace
           };
         } else if (toolName === 'view_file_slice') {
           const pm = inner.match(/<(?:path|file|filepath)>([\s\S]*?)<\/(?:path|file|filepath)>/i);
@@ -2069,7 +2162,15 @@ Re-generate your response now with the proper tool call:`,
     const messagesToSend = this.pruneMessagesForRequest(systemPrompt, session.messages, 120, session);
     let turnUsage = countConversationTokens(messagesToSend, toolsForRun, DEFAULT_CONTEXT_LIMIT);
     turnUsage.lastCompactTimestamp = session.lastCompactTimestamp;
-    this.sessionManager.updateTokens(turnUsage.totalTokens, turnUsage.promptTokens, turnUsage.completionTokens, turnUsage.userTokens);
+    this.sessionManager.updateTokens(turnUsage.totalTokens, turnUsage.promptTokens, turnUsage.completionTokens, turnUsage.userTokens, undefined, turnUsage.toolTokens);
+    const compactLifetime = this.sessionManager.getLifetimeTokenUsage(session);
+    turnUsage.cumulativeTokensSpent = compactLifetime.cumulativeTokensSpent;
+    turnUsage.userTokens = compactLifetime.userTokens;
+    turnUsage.llmTokens = compactLifetime.llmTokens;
+    turnUsage.toolTokens = compactLifetime.toolTokens;
+    turnUsage.cumulativeUserTokens = compactLifetime.userTokens;
+    turnUsage.cumulativeLlmTokens = compactLifetime.llmTokens;
+    turnUsage.cumulativeToolTokens = compactLifetime.toolTokens;
     callbacks.onTokenUsage?.(turnUsage);
 
     callbacks.onChunk?.('История диалога успешно сжата. Все предыдущие сообщения сохранены в интерфейсе, а в запросы к модели передается компактная сводка состояния.');

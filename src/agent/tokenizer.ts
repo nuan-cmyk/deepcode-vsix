@@ -66,12 +66,17 @@ export interface TokenUsageStats {
   maxTokens: number;
   percent: number;
   userTokens?: number;
+  llmTokens?: number;
+  toolTokens?: number;
   systemTokens?: number;
   contextTokens?: number;
   lastCompactTimestamp?: number;
   retentionPercent?: number;
   rawTokensProcessedTotal?: number;
   cumulativeTokensSpent?: number;
+  cumulativeUserTokens?: number;
+  cumulativeLlmTokens?: number;
+  cumulativeToolTokens?: number;
 }
 
 /**
@@ -194,6 +199,7 @@ export function countConversationTokens(
   let systemTokens = baseTools;
   let userTokens = 0;
   let completionTokens = 0;
+  let toolTokens = 0;
   let otherTokens = 0;
 
   for (const msg of messages) {
@@ -202,6 +208,8 @@ export function countConversationTokens(
       completionTokens += msgTokens;
     } else if (msg.role === 'user') {
       userTokens += msgTokens;
+    } else if (msg.role === 'tool') {
+      toolTokens += msgTokens;
     } else if (msg.role === 'system') {
       systemTokens += msgTokens;
     } else {
@@ -213,7 +221,7 @@ export function countConversationTokens(
   systemTokens += 3;
 
   const promptTokens = systemTokens;
-  const contextTokens = systemTokens + userTokens + completionTokens + otherTokens;
+  const contextTokens = systemTokens + userTokens + completionTokens + toolTokens + otherTokens;
   const totalTokens = contextTokens;
   const percent = Math.min(100, Math.round((totalTokens / maxTokens) * 100));
 
@@ -224,6 +232,8 @@ export function countConversationTokens(
     maxTokens,
     percent,
     userTokens,
+    llmTokens: completionTokens,
+    toolTokens,
     systemTokens,
     contextTokens
   };

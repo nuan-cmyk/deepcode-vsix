@@ -991,6 +991,14 @@ body.in-settings-view .token-popover {
   overflow: hidden !important;
 }
 
+.thinking-accordion.bad-thought {
+  border-left: 2px solid rgba(239, 68, 68, 0.45);
+}
+
+.thinking-accordion.bad-thought .thinking-title {
+  color: #f87171;
+}
+
 .debug-trace-accordion .thinking-title {
   color: var(--text-secondary, #9da5b4);
 }
@@ -3066,7 +3074,7 @@ body.is-generating .assistant-message:last-child .working-pulse {
 }
 
 .cascade-step-line.cascade-delay-item {
-  color: #38bdf8;
+  color: var(--text-secondary, #9698a1);
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 11.5px;
   display: flex;
@@ -3074,4 +3082,36 @@ body.is-generating .assistant-message:last-child .working-pulse {
   gap: 6px;
   padding: 3px 0;
 }
+
+/* History Truncated / Too Old Banner */
+.history-truncated-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 12px auto 16px auto;
+  padding: 8px 14px;
+  width: calc(100% - 24px);
+  max-width: 600px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed var(--border-main, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-secondary, #94a3b8);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-align: center;
+  user-select: none;
+}
+
+.history-truncated-banner svg {
+  flex-shrink: 0;
+  color: var(--text-secondary, #94a3b8);
+  opacity: 0.8;
+}
+
+.history-truncated-banner .banner-text {
+  font-weight: 500;
+  letter-spacing: 0.2px;
+}
+
 

@@ -583,35 +583,39 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
     const baseUrl = config.get<string>('baseUrl', 'https://api.thenck4.ru/v1');
 
     let tokenUsage: TokenUsageStats;
+    const lifetime = this.sessionManager.getLifetimeTokenUsage(session);
     if (session.totalTokens && session.totalTokens > 0) {
-      let userTokens = session.userTokens;
-      if (userTokens === undefined && session.messages) {
-        userTokens = 0;
-        for (const m of session.messages) {
-          if (m.role === 'user') {
-            userTokens += countMessageTokens(m);
-          }
-        }
-      }
       tokenUsage = {
-        promptTokens: session.promptTokens || 7908,
+        promptTokens: lifetime.promptTokens,
         completionTokens: session.completionTokens || 0,
         totalTokens: session.totalTokens,
-        userTokens: userTokens || 0,
-        systemTokens: session.promptTokens || 7908,
+        userTokens: lifetime.userTokens,
+        llmTokens: lifetime.llmTokens,
+        toolTokens: lifetime.toolTokens,
+        systemTokens: lifetime.promptTokens,
         contextTokens: session.totalTokens,
         maxTokens: DEFAULT_CONTEXT_LIMIT,
         percent: Math.min(100, Math.round((session.totalTokens / DEFAULT_CONTEXT_LIMIT) * 100)),
         lastCompactTimestamp: session.lastCompactTimestamp,
-        cumulativeTokensSpent: session.cumulativeTokensSpent || session.totalTokens,
+        cumulativeTokensSpent: lifetime.cumulativeTokensSpent,
+        cumulativeUserTokens: lifetime.userTokens,
+        cumulativeLlmTokens: lifetime.llmTokens,
+        cumulativeToolTokens: lifetime.toolTokens,
         rawTokensProcessedTotal: session.rawTokensProcessedTotal
       };
     } else {
       const toolsForInit = session.agentMode ? TOOL_DEFINITIONS : undefined;
       tokenUsage = countConversationTokens(session.messages, toolsForInit, DEFAULT_CONTEXT_LIMIT);
-      tokenUsage.cumulativeTokensSpent = session.cumulativeTokensSpent || tokenUsage.totalTokens;
+      this.sessionManager.updateTokens(tokenUsage.totalTokens, tokenUsage.promptTokens, tokenUsage.completionTokens, tokenUsage.userTokens, undefined, tokenUsage.toolTokens);
+      const updatedLifetime = this.sessionManager.getLifetimeTokenUsage(session);
+      tokenUsage.cumulativeTokensSpent = updatedLifetime.cumulativeTokensSpent;
+      tokenUsage.userTokens = updatedLifetime.userTokens;
+      tokenUsage.llmTokens = updatedLifetime.llmTokens;
+      tokenUsage.toolTokens = updatedLifetime.toolTokens;
+      tokenUsage.cumulativeUserTokens = updatedLifetime.userTokens;
+      tokenUsage.cumulativeLlmTokens = updatedLifetime.llmTokens;
+      tokenUsage.cumulativeToolTokens = updatedLifetime.toolTokens;
       tokenUsage.rawTokensProcessedTotal = session.rawTokensProcessedTotal;
-      this.sessionManager.updateTokens(tokenUsage.totalTokens, tokenUsage.promptTokens, tokenUsage.completionTokens, tokenUsage.userTokens);
     }
 
     this.view.webview.postMessage({
@@ -726,13 +730,18 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
             promptTokens: usage.promptTokens,
             completionTokens: usage.completionTokens,
             totalTokens: usage.totalTokens,
-            userTokens: usage.userTokens,
+            userTokens: usage.userTokens !== undefined ? usage.userTokens : currentSession.cumulativeUserTokens,
+            llmTokens: usage.llmTokens !== undefined ? usage.llmTokens : currentSession.cumulativeLlmTokens,
+            toolTokens: usage.toolTokens !== undefined ? usage.toolTokens : currentSession.cumulativeToolTokens,
             systemTokens: usage.systemTokens,
             contextTokens: usage.contextTokens,
             maxTokens: usage.maxTokens,
             percent: usage.percent,
             lastCompactTimestamp: usage.lastCompactTimestamp || currentSession.lastCompactTimestamp,
-            cumulativeTokensSpent: usage.cumulativeTokensSpent || currentSession.cumulativeTokensSpent || usage.totalTokens,
+            cumulativeTokensSpent: usage.cumulativeTokensSpent || currentSession.cumulativeTokensSpent,
+            cumulativeUserTokens: usage.cumulativeUserTokens || currentSession.cumulativeUserTokens,
+            cumulativeLlmTokens: usage.cumulativeLlmTokens || currentSession.cumulativeLlmTokens,
+            cumulativeToolTokens: usage.cumulativeToolTokens || currentSession.cumulativeToolTokens,
             rawTokensProcessedTotal: usage.rawTokensProcessedTotal || currentSession.rawTokensProcessedTotal
           });
         },

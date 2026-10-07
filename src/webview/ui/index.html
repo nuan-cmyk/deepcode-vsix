@@ -61,6 +61,10 @@
               <span id="tokenDetailLlm" class="token-detail-value">0</span>
             </div>
             <div class="token-detail-row">
+              <span class="token-detail-label" id="tokenDetailToolsLabel">Tools:</span>
+              <span id="tokenDetailTools" class="token-detail-value">0</span>
+            </div>
+            <div class="token-detail-row">
               <span class="token-detail-label" id="tokenDetailPromptLabel">Prompt:</span>
               <span id="tokenDetailPrompt" class="token-detail-value">0</span>
             </div>
@@ -206,7 +210,7 @@
                 </label>
                 <label class="default-row">
                   <span>Plan Mode</span>
-                  <input type="checkbox" id="defPlanMode" checked />
+                  <input type="checkbox" id="defPlanMode" />
                 </label>
               </div>
             </div>
@@ -230,6 +234,14 @@
                   <span id="lblDefAutoUpdate">Auto Update</span>
                   <input type="checkbox" id="defAutoUpdate" />
                 </label>
+                <label class="default-row">
+                  <span id="lblDefRemoveOldContext">Remove old context from file</span>
+                  <input type="checkbox" id="defRemoveOldContext" />
+                </label>
+                <label class="default-row" id="lblDefHideOldContextRow">
+                  <span id="lblDefHideOldContext">Hide old context</span>
+                  <input type="checkbox" id="defHideOldContext" checked />
+                </label>
                 <div class="default-row">
                   <span id="lblDefSandbox">Default Sandbox</span>
                   <select id="defSandboxMode" class="auth-input" style="width: auto; padding: 2px 8px; font-size: 11px;">
@@ -251,7 +263,7 @@
               <div class="settings-fields-grid">
                 <div class="settings-field-group">
                   <label for="devRequestDelayInput" id="lblRequestDelay">API Request Delay (ms):</label>
-                  <input type="number" id="devRequestDelayInput" class="auth-input" value="0" min="0" step="50" />
+                  <input type="number" id="devRequestDelayInput" class="auth-input" value="3000" min="0" step="50" />
                 </div>
                 <div class="settings-field-group">
                   <label for="devPacingDelayInput" id="lblPacingDelay">Turn Pacing Delay (ms):</label>
@@ -465,7 +477,7 @@
             </div>
           </div>
           <label class="switch-toggle">
-            <input type="checkbox" id="togglePlan" checked>
+            <input type="checkbox" id="togglePlan">
             <span class="switch-slider"></span>
           </label>
         </div>

@@ -107,6 +107,7 @@ const I18N = {
     tokensSpent: 'Tokens Spent:',
     detailUser: 'User:',
     detailLlm: 'LLM:',
+    detailTools: 'Tools:',
     detailContext: 'Context:',
     detailPrompt: 'Prompt:',
     detailCompact: 'Last Compact:',
@@ -116,6 +117,9 @@ const I18N = {
     defDebugModeLabel: 'Debug Mode',
     defAutoOpenFileLabel: 'Auto-open modified files',
     defAutoUpdateLabel: 'Auto Update',
+    defRemoveOldContextLabel: 'Remove old context from file',
+    defHideOldContextLabel: 'Hide old context',
+    historyTooOldBanner: 'History is too old (compacted into memory)',
     lblCheckUpdate: 'Check for Updates',
     lblCurrentVersion: 'Current Version:',
     updateChecking: 'Checking...',
@@ -240,6 +244,7 @@ const I18N = {
     tokensSpent: 'Потрачено токенов:',
     detailUser: 'User:',
     detailLlm: 'LLM:',
+    detailTools: 'Инструменты:',
     detailContext: 'Контекст:',
     detailPrompt: 'Промпт:',
     detailCompact: 'Компактинг:',
@@ -249,6 +254,9 @@ const I18N = {
     defDebugModeLabel: 'Режим отладки',
     defAutoOpenFileLabel: 'Автоматически открывать измененные файлы',
     defAutoUpdateLabel: 'Авто-обновление',
+    defRemoveOldContextLabel: 'Remove old context from file',
+    defHideOldContextLabel: 'Hide old context',
+    historyTooOldBanner: 'History is too old (сжато в память агента)',
     lblCheckUpdate: 'Проверить обновления',
     lblCurrentVersion: 'Текущая версия:',
     updateChecking: 'Проверка...',
@@ -419,6 +427,8 @@ function applyLanguage(lang) {
     ['lblDefDebugMode', 'defDebugModeLabel'],
     ['lblDefAutoOpenFile', 'defAutoOpenFileLabel'],
     ['lblDefAutoUpdate', 'defAutoUpdateLabel'],
+    ['lblDefRemoveOldContext', 'defRemoveOldContextLabel'],
+    ['lblDefHideOldContext', 'defHideOldContextLabel'],
     ['lblCheckUpdate', 'lblCheckUpdate'],
     ['lblTimeoutsSec', 'lblTimeoutsSec'],
     ['lblRequestDelay', 'lblRequestDelay'],
@@ -443,6 +453,7 @@ function applyLanguage(lang) {
     ['tokenPopoverSpentLabel', 'tokensSpent'],
     ['tokenDetailUserLabel', 'detailUser'],
     ['tokenDetailLlmLabel', 'detailLlm'],
+    ['tokenDetailToolsLabel', 'detailTools'],
     ['tokenDetailContextLabel', 'detailContext'],
     ['tokenDetailPromptLabel', 'detailPrompt'],
     ['tokenDetailCompactLabel', 'detailCompact'],
@@ -563,6 +574,7 @@ const tokenProgressBarWrap = document.getElementById('tokenProgressBarWrap');
 const tokenSpentDetails = document.getElementById('tokenSpentDetails');
 const tokenDetailUser = document.getElementById('tokenDetailUser');
 const tokenDetailLlm = document.getElementById('tokenDetailLlm');
+const tokenDetailTools = document.getElementById('tokenDetailTools');
 const tokenDetailContext = document.getElementById('tokenDetailContext');
 const tokenDetailPrompt = document.getElementById('tokenDetailPrompt');
 const tokenDetailCompact = document.getElementById('tokenDetailCompact');
@@ -644,6 +656,9 @@ const defSandboxMode = document.getElementById('defSandboxMode');
 const defDebugMode = document.getElementById('defDebugMode');
 const defAutoOpenFile = document.getElementById('defAutoOpenFile');
 const defAutoUpdate = document.getElementById('defAutoUpdate');
+const defRemoveOldContext = document.getElementById('defRemoveOldContext');
+const defHideOldContext = document.getElementById('defHideOldContext');
+const lblDefHideOldContextRow = document.getElementById('lblDefHideOldContextRow');
 const checkUpdateBtn = document.getElementById('checkUpdateBtn');
 const updateStatusText = document.getElementById('updateStatusText');
 const currentVersionValue = document.getElementById('currentVersionValue');
@@ -661,7 +676,7 @@ const devLatinRatioInput = document.getElementById('devLatinRatioInput');
 
 // State
 let isGenerating = false;
-let savedPlanMode = true;
+let savedPlanMode = false;
 try {
   const p = localStorage.getItem('deepcode_plan_mode');
   if (p !== null) savedPlanMode = (p === 'true');
@@ -1101,6 +1116,29 @@ if (defDebugMode) {
   });
 }
 
+function syncOldContextToggles() {
+  if (!defRemoveOldContext || !defHideOldContext) return;
+  if (defRemoveOldContext.checked) {
+    defHideOldContext.disabled = true;
+    if (lblDefHideOldContextRow) {
+      lblDefHideOldContextRow.style.opacity = '0.45';
+      lblDefHideOldContextRow.style.pointerEvents = 'none';
+    }
+  } else {
+    defHideOldContext.disabled = false;
+    if (lblDefHideOldContextRow) {
+      lblDefHideOldContextRow.style.opacity = '1';
+      lblDefHideOldContextRow.style.pointerEvents = 'auto';
+    }
+  }
+}
+
+if (defRemoveOldContext) {
+  defRemoveOldContext.addEventListener('change', () => {
+    syncOldContextToggles();
+  });
+}
+
 // Token Donut & Popover Logic
 const BPE_SPLIT_REGEX = /'s|'t|'re|'ve|'m|'ll|'d|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu;
 
@@ -1168,12 +1206,14 @@ function calculateClientTokenUsage(messages, model) {
       completionTokens += t;
     } else if (m.role === 'user') {
       userTokens += t;
+    } else if (m.role === 'tool') {
+      toolTokens += t;
     } else {
       otherTokens += t;
     }
   }
 
-  const contextTokens = basePromptTokens + userTokens + completionTokens + otherTokens;
+  const contextTokens = basePromptTokens + userTokens + completionTokens + toolTokens + otherTokens;
   const totalTokens = contextTokens;
   const percent = Math.min(100, Math.round((totalTokens / maxTokens) * 100));
   return {
@@ -1181,6 +1221,7 @@ function calculateClientTokenUsage(messages, model) {
     completionTokens,
     userTokens,
     llmTokens: completionTokens,
+    toolTokens,
     contextTokens,
     totalTokens,
     maxTokens,
@@ -1194,15 +1235,16 @@ function updateTokenDonut(usage) {
   const total = usage.totalTokens || 0;
   const prompt = usage.promptTokens !== undefined ? usage.promptTokens : 7908;
   const completion = usage.completionTokens || 0;
-  const user = usage.userTokens !== undefined ? usage.userTokens : 0;
-  const llm = usage.llmTokens !== undefined ? usage.llmTokens : completion;
-  const context = usage.contextTokens !== undefined ? usage.contextTokens : (total || (prompt + user + llm));
+  const user = usage.userTokens !== undefined ? usage.userTokens : (usage.cumulativeUserTokens || 0);
+  const llm = usage.llmTokens !== undefined ? usage.llmTokens : (usage.cumulativeLlmTokens || completion);
+  const tools = usage.toolTokens !== undefined ? usage.toolTokens : (usage.cumulativeToolTokens || 0);
+  const context = usage.contextTokens !== undefined ? usage.contextTokens : (total || (prompt + user + llm + tools));
   const percent = Math.min(100, Math.max(0, Math.round((context / max) * 100)));
 
-  // Cumulative tokens spent across the lifetime of the session (never decreased by compact)
+  // Cumulative tokens spent across the lifetime of the session: User + LLM + Tools + Prompt (never compressed by compact)
   const totalSpent = usage.cumulativeTokensSpent !== undefined
     ? usage.cumulativeTokensSpent
-    : (usage.rawTokensProcessedTotal ? usage.rawTokensProcessedTotal + completion : (total || context));
+    : (user + llm + tools + prompt);
 
   if (tokenDonutProgress) {
     tokenDonutProgress.setAttribute('stroke-dasharray', `${percent}, 100`);
@@ -1238,6 +1280,10 @@ function updateTokenDonut(usage) {
 
   if (tokenDetailLlm) {
     tokenDetailLlm.textContent = formatTokenCount(llm);
+  }
+
+  if (tokenDetailTools) {
+    tokenDetailTools.textContent = formatTokenCount(tools);
   }
 
   if (tokenDetailPrompt) {
@@ -1351,13 +1397,15 @@ function saveCredentials(key, url, model) {
     agentMode: defAgentMode ? defAgentMode.checked : true,
     thinking: defThinking ? defThinking.checked : true,
     search: defSearch ? defSearch.checked : false,
-    planMode: defPlanMode ? defPlanMode.checked : true,
+    planMode: defPlanMode ? defPlanMode.checked : false,
     sandboxMode: defSandboxMode ? defSandboxMode.value : 'local',
     debugMode: defDebugMode ? defDebugMode.checked : false,
     autoOpenModifiedFiles: defAutoOpenFile ? defAutoOpenFile.checked : false,
     autoUpdate: defAutoUpdate ? defAutoUpdate.checked : false,
+    removeOldContextFromFile: defRemoveOldContext ? defRemoveOldContext.checked : false,
+    hideOldContext: defHideOldContext ? defHideOldContext.checked : true,
     pacingDelayMs: devPacingDelayInput ? (parseInt(devPacingDelayInput.value, 10) || 1500) : 1500,
-    requestDelayMs: devRequestDelayInput ? (parseInt(devRequestDelayInput.value, 10) || 0) : 0,
+    requestDelayMs: devRequestDelayInput ? (parseInt(devRequestDelayInput.value, 10) || 3000) : 3000,
     connectTimeoutSec: devConnectTimeoutInput ? (parseInt(devConnectTimeoutInput.value, 10) || 75) : 75,
     readTimeoutSec: devReadTimeoutInput ? (parseInt(devReadTimeoutInput.value, 10) || 45) : 45,
     thinkingTimeoutSec: devThinkingTimeoutInput ? (parseInt(devThinkingTimeoutInput.value, 10) || 9) : 9,
@@ -1781,7 +1829,6 @@ function ensureWorkingBlock(asstEl) {
           <span class="working-title">${t('workingTitle')}</span>
           <span class="working-spinner"></span>
           <span class="working-time" style="display: none;"></span>
-          <span class="working-api-delay" style="display: none;"></span>
         </div>
         <span class="working-chevron">${LUCIDE.chevron}</span>
       </div>
@@ -2118,9 +2165,51 @@ function finishDebugTrace() {
 
 
 function dismissThinkingOnUnstuck(feedEl) {
-  // Finish any active in-flight thinking accordion so its content is preserved and collapsed.
-  // Never delete past valid thought blocks!
-  finishThinking();
+  // Find strictly the currently active/in-flight thinking accordion that was interrupted
+  let interruptedAccordion = currentThinkingAccordion;
+  if (!interruptedAccordion && feedEl) {
+    interruptedAccordion = feedEl.querySelector('.thinking-accordion.active:not(.debug-trace-accordion)');
+  }
+
+  if (!interruptedAccordion) {
+    return;
+  }
+
+  // Explicitly tag this element as a bad/interrupted thought
+  interruptedAccordion.dataset.badThought = 'true';
+  interruptedAccordion.classList.add('bad-thought');
+
+  // In Debug Mode: preserve the bad_thought so user can inspect it, but format its title clearly
+  if (modeStates.debugMode) {
+    const duration = thinkingStartTime ? Math.max(1, Math.round((Date.now() - thinkingStartTime) / 1000)) : 1;
+    const title = interruptedAccordion.querySelector('.thinking-title');
+    if (title) {
+      title.textContent = `Thought (interrupted) • ${duration}s`;
+    }
+    interruptedAccordion.classList.remove('active');
+    interruptedAccordion.classList.remove('open');
+    const dot = interruptedAccordion.querySelector('.thinking-dot, .debug-dot');
+    if (dot) dot.style.display = 'none';
+    const streamViewport = interruptedAccordion.querySelector('.thinking-stream-viewport');
+    if (streamViewport) streamViewport.remove();
+  } else {
+    // Normal mode: smoothly fade out and remove ONLY the marked bad_thought
+    if (!interruptedAccordion.classList.contains('fade-out-up')) {
+      const streamViewport = interruptedAccordion.querySelector('.thinking-stream-viewport');
+      if (streamViewport) streamViewport.remove();
+      interruptedAccordion.classList.remove('active', 'open');
+      interruptedAccordion.classList.add('fade-out-up');
+      setTimeout(() => {
+        if (interruptedAccordion.parentNode) {
+          interruptedAccordion.remove();
+        }
+      }, 350);
+    }
+  }
+
+  currentThinkingAccordion = null;
+  currentThinkingContentEl = null;
+  thinkingStartTime = null;
 }
 
 function finishUnstuck() {
@@ -2771,6 +2860,9 @@ window.addEventListener('message', (event) => {
           if (defDebugMode) defDebugMode.checked = Boolean(msg.defaults.debugMode);
           if (defAutoOpenFile) defAutoOpenFile.checked = Boolean(msg.defaults.autoOpenModifiedFiles);
           if (defAutoUpdate) defAutoUpdate.checked = Boolean(msg.defaults.autoUpdate);
+          if (defRemoveOldContext) defRemoveOldContext.checked = Boolean(msg.defaults.removeOldContextFromFile);
+          if (defHideOldContext) defHideOldContext.checked = msg.defaults.hideOldContext !== undefined ? Boolean(msg.defaults.hideOldContext) : true;
+          syncOldContextToggles();
           if (devPacingDelayInput && msg.defaults.pacingDelayMs !== undefined) devPacingDelayInput.value = msg.defaults.pacingDelayMs;
           if (devRequestDelayInput && msg.defaults.requestDelayMs !== undefined) devRequestDelayInput.value = msg.defaults.requestDelayMs;
           if (devConnectTimeoutInput && msg.defaults.connectTimeoutSec !== undefined) devConnectTimeoutInput.value = msg.defaults.connectTimeoutSec;
@@ -2859,6 +2951,9 @@ window.addEventListener('message', (event) => {
         if (defDebugMode) defDebugMode.checked = Boolean(msg.defaults.debugMode);
         if (defAutoOpenFile) defAutoOpenFile.checked = Boolean(msg.defaults.autoOpenModifiedFiles);
         if (defAutoUpdate) defAutoUpdate.checked = Boolean(msg.defaults.autoUpdate);
+        if (defRemoveOldContext) defRemoveOldContext.checked = Boolean(msg.defaults.removeOldContextFromFile);
+        if (defHideOldContext) defHideOldContext.checked = msg.defaults.hideOldContext !== undefined ? Boolean(msg.defaults.hideOldContext) : true;
+        syncOldContextToggles();
         if (devPacingDelayInput && msg.defaults.pacingDelayMs !== undefined) devPacingDelayInput.value = msg.defaults.pacingDelayMs;
         if (devRequestDelayInput && msg.defaults.requestDelayMs !== undefined) devRequestDelayInput.value = msg.defaults.requestDelayMs;
         if (devConnectTimeoutInput && msg.defaults.connectTimeoutSec !== undefined) devConnectTimeoutInput.value = msg.defaults.connectTimeoutSec;
@@ -2910,23 +3005,34 @@ window.addEventListener('message', (event) => {
       if (msg.tokenUsage) {
         updateTokenDonut(msg.tokenUsage);
       } else if (msg.session && msg.session.totalTokens) {
-        let userTokens = msg.session.userTokens;
-        if (userTokens === undefined && msg.session.messages) {
-          userTokens = 0;
-          for (const m of msg.session.messages) {
-            if (m.role === 'user' && m.content) {
-              userTokens += countTokensClient(m.content) + 4;
-            }
-          }
-        }
+        const userTokens = msg.session.cumulativeUserTokens !== undefined
+          ? msg.session.cumulativeUserTokens
+          : (msg.session.userTokens || 0);
+        const llmTokens = msg.session.cumulativeLlmTokens !== undefined
+          ? msg.session.cumulativeLlmTokens
+          : (msg.session.completionTokens || 0);
+        const toolTokens = msg.session.cumulativeToolTokens !== undefined
+          ? msg.session.cumulativeToolTokens
+          : (msg.session.toolTokens || 0);
+        const promptTokens = msg.session.promptTokens || 7908;
+        const totalSpent = msg.session.cumulativeTokensSpent !== undefined
+          ? msg.session.cumulativeTokensSpent
+          : (userTokens + llmTokens + toolTokens + promptTokens);
+
         updateTokenDonut({
           totalTokens: msg.session.totalTokens,
-          promptTokens: msg.session.promptTokens || 7908,
+          promptTokens,
           completionTokens: msg.session.completionTokens || 0,
-          userTokens: userTokens || 0,
+          userTokens,
+          llmTokens,
+          toolTokens,
           contextTokens: msg.session.totalTokens,
           maxTokens: 1000000,
-          lastCompactTimestamp: sessionLastCompactTimestamp
+          lastCompactTimestamp: sessionLastCompactTimestamp,
+          cumulativeTokensSpent: totalSpent,
+          cumulativeUserTokens: userTokens,
+          cumulativeLlmTokens: llmTokens,
+          cumulativeToolTokens: toolTokens
         });
       } else if (msg.session) {
         const usage = calculateClientTokenUsage(msg.session.messages, msg.session.model);
@@ -2973,7 +3079,43 @@ window.addEventListener('message', (event) => {
           }
         };
 
-        for (const m of msg.session.messages) {
+        let rawMessages = msg.session.messages || [];
+        const isRemoveOld = Boolean(msg.defaults?.removeOldContextFromFile || defRemoveOldContext?.checked);
+        const isHideOld = Boolean(msg.defaults?.hideOldContext || defHideOldContext?.checked);
+        const compactBlocksCount = (msg.session.compactedBlocks || []).length;
+        const compactMilestones = msg.session.compactMilestones || [];
+        const firstMilestone = compactMilestones[0];
+
+        let isTruncated = false;
+        // Check if history was already truncated on disk:
+        if (msg.session.historyTruncatedBeforeMessageId) {
+          isTruncated = true;
+        }
+
+        // If at least 3 compacts have occurred:
+        // And either removeOldContextFromFile or hideOldContext is enabled:
+        if (compactBlocksCount >= 3 && (isRemoveOld || isHideOld)) {
+          if (firstMilestone && firstMilestone.atMessageId) {
+            const cutIdx = rawMessages.findIndex(m => m.id === firstMilestone.atMessageId);
+            if (cutIdx !== -1) {
+              rawMessages = rawMessages.slice(cutIdx + 1);
+              isTruncated = true;
+            }
+          }
+        }
+
+        // If history is truncated, prepend the "History is too old" banner at the top of chat
+        if (isTruncated) {
+          const bannerEl = document.createElement('div');
+          bannerEl.className = 'history-truncated-banner';
+          bannerEl.innerHTML = `
+            ${LUCIDE.history || ''}
+            <span class="banner-text">${t('historyTooOldBanner') || 'History is too old (compacted into memory)'}</span>
+          `;
+          messagesList.appendChild(bannerEl);
+        }
+
+        for (const m of rawMessages) {
           if (m.role === 'user') {
             if (isInternalMessage(m)) {
               appendInternalDebugMessage(m.content, m.id || 'internal_prompt');
@@ -3742,16 +3884,11 @@ window.addEventListener('message', (event) => {
       const wbTime = wb.querySelector('.working-time');
       if (wbTime) wbTime.style.display = 'none';
 
-      const delayBadge = wb.querySelector('.working-api-delay');
       const feedEl = wb.querySelector('.activity-feed');
 
       if (msg.remainingMs > 0) {
         const secStr = (msg.remainingMs / 1000).toFixed(1);
         const reasonStr = msg.reason || 'pacing';
-        if (delayBadge) {
-          delayBadge.textContent = `⏱️ API delay: ${secStr}s (${reasonStr})`;
-          delayBadge.style.display = 'inline-flex';
-        }
 
         if (feedEl) {
           let delayItem = feedEl.querySelector('.cascade-delay-item');
@@ -3761,24 +3898,18 @@ window.addEventListener('message', (event) => {
             feedEl.appendChild(delayItem);
           }
           delayItem.innerHTML = `
-            <span class="cascade-action-label" style="color:#38bdf8; font-weight:600;">API Delay</span>
-            <span style="color:#f8fafc; font-family:var(--vscode-editor-font-family, monospace); font-weight:600;">${secStr}s</span>
-            <span style="color:#94a3b8; font-size:10.5px;">(${escapeHtml(reasonStr)})</span>
+            <span class="cascade-action-label">API Delay</span>
+            <span style="font-family:var(--vscode-editor-font-family, monospace);">${secStr}s</span>
+            <span style="color:var(--text-muted, #71717a); font-size:10.5px;">(${escapeHtml(reasonStr)})</span>
           `;
         }
       } else {
-        if (delayBadge) {
-          delayBadge.textContent = `⚡ Sending request...`;
-          setTimeout(() => {
-            if (delayBadge) delayBadge.style.display = 'none';
-          }, 800);
-        }
         if (feedEl) {
           const delayItem = feedEl.querySelector('.cascade-delay-item');
           if (delayItem) {
             delayItem.innerHTML = `
-              <span class="cascade-action-label" style="color:#4ade80; font-weight:600;">API Request</span>
-              <span style="color:#94a3b8; font-size:10.5px;">Dispatched</span>
+              <span class="cascade-action-label">API Request</span>
+              <span style="color:var(--text-muted, #71717a); font-size:10.5px;">Dispatched</span>
             `;
             setTimeout(() => {
               if (delayItem && delayItem.parentNode) delayItem.remove();

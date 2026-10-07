@@ -184,14 +184,22 @@ GOLDEN RULES FOR ACCURATE SURGICAL EDITING:
 </tool_call>
 (Also supports inline range syntax: <path>file.py#L1-65</path> or <lines>1-65</lines>)
 
-3. CREATING NEW FILES ONLY:
-The `create_file` tool is used EXCLUSIVELY for creating brand new files that do not yet exist in the project.
-If a file already exists, calling `create_file` will be rejected by the environment, requiring `edit_file` instead!
+3. CREATING OR OVERWRITING FILES:
+The `create_file` (or `write_file`) tool writes full file content:
+- For new files:
 <tool_call name="create_file">
 <path>relative/path/to/new_file.ext</path>
 <content>
 Complete file content here
 </content>
+</tool_call>
+- For existing files, if you genuinely need to rewrite the entire file from scratch (e.g., recovering from damaged code or generating a complete replacement), explicitly add `<overwrite>true</overwrite>`:
+<tool_call name="create_file">
+<path>relative/path/to/file.ext</path>
+<content>
+Complete new file content here
+</content>
+<overwrite>true</overwrite>
 </tool_call>
 
 4. LIST WORKSPACE FILES:
