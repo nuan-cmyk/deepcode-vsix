@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ChatSession, ChatMessage, Project, SandboxMode, DefaultChatSettings } from './types';
+import { countMessageTokens } from './tokenizer';
 import { logger } from '../logger';
 
 const PROJECTS_STORAGE_KEY = 'deepseek_agent_projects_v2';
@@ -21,13 +22,13 @@ export class SessionManager {
     agentMode: true,
     thinking: true,
     search: false,
-    planMode: true,
+    planMode: false,
     sandboxMode: 'local',
     debugMode: false,
     autoOpenModifiedFiles: false,
     autoUpdate: false,
     pacingDelayMs: 1500,
-    requestDelayMs: 0,
+    requestDelayMs: 3000,
     connectTimeoutSec: 75,
     readTimeoutSec: 45,
     thinkingTimeoutSec: 9,
@@ -36,7 +37,9 @@ export class SessionManager {
     contextLimitTokens: 1000000,
     compactThresholdTokens: 80000,
     cyrillicCharsPerToken: 1.7,
-    latinCharsPerToken: 3.8
+    latinCharsPerToken: 3.8,
+    removeOldContextFromFile: false,
+    hideOldContext: true
   };
 
   constructor(context: vscode.ExtensionContext) {
@@ -99,6 +102,7 @@ export class SessionManager {
             !m.content?.startsWith('[COMPACTED CONTEXT BRIEFING]')
           );
           this.sessions.set(s.id, s);
+          this.getLifetimeTokenUsage(s);
         }
       } catch {}
     }
@@ -428,6 +432,7 @@ export class SessionManager {
     const session = this.getCurrentSession();
     session.messages.push(msg);
     session.updatedAt = Date.now();
+    this.getLifetimeTokenUsage(session);
 
     if (msg.role === 'user') {
       logger.log('Chat:In', `[User] ${msg.content}`);
@@ -516,17 +521,68 @@ export class SessionManager {
     this.saveToStorage();
   }
 
-  public updateTokens(totalTokens: number, promptTokens?: number, completionTokens?: number, userTokens?: number, addedSpent?: number): void {
+  public getLifetimeTokenUsage(session?: ChatSession): {
+    promptTokens: number;
+    userTokens: number;
+    llmTokens: number;
+    toolTokens: number;
+    cumulativeTokensSpent: number;
+    contextTokens: number;
+  } {
+    const s = session || this.getCurrentSession();
+    const prompt = s.promptTokens || 7908;
+
+    let activeUser = 0;
+    let activeLlm = 0;
+    let activeTool = 0;
+    if (s.messages && s.messages.length > 0) {
+      for (const m of s.messages) {
+        if (m.role === 'user' && !m.isInternal) {
+          activeUser += countMessageTokens(m);
+        } else if (m.role === 'assistant') {
+          activeLlm += countMessageTokens(m);
+        } else if (m.role === 'tool') {
+          activeTool += countMessageTokens(m);
+        }
+      }
+    }
+
+    const purgedUser = s.purgedUserTokens || 0;
+    const purgedLlm = s.purgedLlmTokens || 0;
+    const purgedTool = s.purgedToolTokens || 0;
+
+    const userTokens = purgedUser + activeUser;
+    const llmTokens = purgedLlm + activeLlm;
+    const toolTokens = purgedTool + activeTool;
+    const totalSpent = prompt + userTokens + llmTokens + toolTokens;
+
+    s.userTokens = activeUser;
+    s.completionTokens = activeLlm;
+    s.toolTokens = activeTool;
+    s.cumulativeUserTokens = userTokens;
+    s.cumulativeLlmTokens = llmTokens;
+    s.cumulativeToolTokens = toolTokens;
+    s.cumulativeTokensSpent = totalSpent;
+
+    return {
+      promptTokens: prompt,
+      userTokens,
+      llmTokens,
+      toolTokens,
+      cumulativeTokensSpent: totalSpent,
+      contextTokens: s.totalTokens || (prompt + activeUser + activeLlm + activeTool)
+    };
+  }
+
+  public updateTokens(totalTokens: number, promptTokens?: number, completionTokens?: number, userTokens?: number, _addedSpent?: number, toolTokens?: number): void {
     const session = this.getCurrentSession();
     session.totalTokens = totalTokens;
     if (promptTokens !== undefined) session.promptTokens = promptTokens;
     if (completionTokens !== undefined) session.completionTokens = completionTokens;
     if (userTokens !== undefined) session.userTokens = userTokens;
-    if (addedSpent && addedSpent > 0) {
-      session.cumulativeTokensSpent = (session.cumulativeTokensSpent || 0) + addedSpent;
-    } else if (session.cumulativeTokensSpent === undefined || session.cumulativeTokensSpent < totalTokens) {
-      session.cumulativeTokensSpent = Math.max(session.cumulativeTokensSpent || 0, totalTokens);
-    }
+    if (toolTokens !== undefined) session.toolTokens = toolTokens;
+
+    this.getLifetimeTokenUsage(session);
     this.saveToStorage();
   }
 
@@ -546,6 +602,16 @@ export class SessionManager {
     }
     session.compactedBlocks.push(summary);
 
+    if (!session.compactMilestones) {
+      session.compactMilestones = [];
+    }
+    const compactIdx = session.compactedBlocks.length; // 1-based index (1, 2, 3...)
+    session.compactMilestones.push({
+      compactIndex: compactIdx,
+      atMessageId,
+      timestamp: Date.now()
+    });
+
     // Assemble unified summary with Root Objective + All Milestone Stages
     let combined = '';
     if (session.rootPrompt) {
@@ -557,6 +623,40 @@ export class SessionManager {
     session.compactedAtMessageId = atMessageId;
     session.conversationId = undefined; // fresh conversation with upstream server for the new compacted phase
     session.lastCompactTimestamp = Date.now();
+
+    // Check if 3rd compact (or greater) has been reached:
+    // If removeOldContextFromFile is enabled, physically purge messages before the 1st compact milestone from file
+    if (compactIdx >= 3 && session.compactMilestones.length >= 1) {
+      const milestone1 = session.compactMilestones[0];
+      if (milestone1 && milestone1.atMessageId) {
+        session.historyTruncatedBeforeMessageId = milestone1.atMessageId;
+        if (this.defaultSettings.removeOldContextFromFile) {
+          const cutIdx = (session.messages || []).findIndex(m => m.id === milestone1.atMessageId);
+          if (cutIdx !== -1) {
+            const removed = session.messages.slice(0, cutIdx + 1);
+            let remUser = 0;
+            let remLlm = 0;
+            let remTool = 0;
+            for (const rm of removed) {
+              if (rm.role === 'user' && !rm.isInternal) {
+                remUser += countMessageTokens(rm);
+              } else if (rm.role === 'assistant') {
+                remLlm += countMessageTokens(rm);
+              } else if (rm.role === 'tool') {
+                remTool += countMessageTokens(rm);
+              }
+            }
+            session.purgedUserTokens = (session.purgedUserTokens || 0) + remUser;
+            session.purgedLlmTokens = (session.purgedLlmTokens || 0) + remLlm;
+            session.purgedToolTokens = (session.purgedToolTokens || 0) + remTool;
+            // Retain messages starting immediately after milestone 1
+            session.messages = session.messages.slice(cutIdx + 1);
+          }
+        }
+      }
+    }
+
+    this.getLifetimeTokenUsage(session);
     this.saveToStorage();
   }
 
