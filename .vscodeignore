@@ -2,3 +2,6 @@
 .vscode/**
 .gitignore
 tsconfig.json
+debug_state.json
+*.log
+*.vsix
