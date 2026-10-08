@@ -372,7 +372,9 @@ body.in-settings-view .token-popover {
 .settings-fullscreen-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 16px 40px 16px;
+  padding: 20px 16px 20px 16px;
+  display: flex;
+  flex-direction: column;
 }
 
 .settings-container {
@@ -382,6 +384,7 @@ body.in-settings-view .token-popover {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  flex: 1;
 }
 
 .settings-section-card {
@@ -498,6 +501,26 @@ body.in-settings-view .token-popover {
   border-color: var(--border-focus) !important;
 }
 
+.settings-footer-credits {
+  margin-top: auto;
+  padding-top: 24px;
+  padding-bottom: 6px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted, #71717a);
+  opacity: 0.55;
+  user-select: none;
+  letter-spacing: 0.4px;
+  font-weight: 500;
+  transition: opacity 0.2s ease, color 0.2s ease;
+  pointer-events: auto;
+}
+
+.settings-footer-credits:hover {
+  opacity: 0.9;
+  color: var(--text-secondary, #a1a1aa);
+}
+
 .btn-sm {
   padding: 5px 14px !important;
   font-size: 11.5px !important;
@@ -609,6 +632,56 @@ body.in-settings-view .token-popover {
   color: var(--danger);
 }
 
+.reset-token-btn {
+  background: rgba(239, 68, 68, 0.1) !important;
+  border: 1px solid rgba(239, 68, 68, 0.45) !important;
+  color: #ef4444 !important;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer !important;
+  font-size: 11.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.reset-token-btn svg {
+  stroke: #ef4444;
+  transition: stroke 0.18s ease;
+}
+
+.reset-token-btn:hover {
+  background: #ef4444 !important;
+  border-color: #dc2626 !important;
+  color: #ffffff !important;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 10px rgba(239, 68, 68, 0.35);
+}
+
+.reset-token-btn:hover svg {
+  stroke: #ffffff !important;
+}
+
+.reset-token-btn:active {
+  transform: translateY(0);
+  background: #dc2626 !important;
+}
+
+.reset-token-btn.done {
+  background: rgba(16, 185, 129, 0.15) !important;
+  border-color: #10b981 !important;
+  color: #10b981 !important;
+  pointer-events: none;
+}
+
+.reset-token-btn.done svg {
+  stroke: #10b981 !important;
+}
+
 .auth-modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -632,45 +705,278 @@ body.in-settings-view .token-popover {
   transform: translateY(-1px);
 }
 
-/* Onboarding Card (inside chat) */
-.onboarding-card {
-  background: var(--bg-surface);
+/* ========================================================
+   First-Time Onboarding & Login Screen (when no API token)
+   ======================================================== */
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-app);
+  padding: 24px 16px;
+  overflow-y: auto;
+  animation: onboardingFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes onboardingFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.onboarding-modal-card {
+  max-width: 320px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}
+
+.onboarding-hero {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin: 0 auto 24px auto;
+  user-select: none;
+}
+
+.onboarding-mascot-col {
+  width: 92px;
+  height: 118px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.onboarding-mascot-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  filter: none;
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.onboarding-mascot-col:hover .onboarding-mascot-img {
+  transform: scale(1.08) translateY(-2px);
+}
+
+.onboarding-brand-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  text-align: left;
+  margin-top: 18px;
+}
+
+.onboarding-brand-deep {
+  position: relative;
+  z-index: 2;
+  display: inline-block;
+  font-size: 46px;
+  font-weight: 700;
+  line-height: 0.95;
+  letter-spacing: 0;
+  color: var(--text-primary);
+  transform: scale(1.55, 1.36);
+  transform-origin: left center;
+  margin-bottom: 0;
+}
+
+.onboarding-ticker-box {
+  position: relative;
+  z-index: 1;
+  height: 30px;
+  min-width: 180px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.onboarding-ticker-word {
+  display: inline-block;
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 32px;
+  color: #007acc;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  will-change: transform, opacity;
+}
+
+.onboarding-form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onboarding-input-group {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.onboarding-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  letter-spacing: 0.2px;
+}
+
+.onboarding-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.onboarding-input-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.onboarding-input {
+  width: 100%;
+  height: 38px;
+  padding: 0 36px 0 34px;
+  background: var(--bg-input);
   border: 1px solid var(--border-main);
   border-radius: var(--radius-md);
-  padding: 16px;
-  margin-bottom: 16px;
-  text-align: center;
-}
-
-.onboarding-icon {
-  margin-bottom: 10px;
-  display: flex;
-  justify-content: center;
-}
-
-.onboarding-card h3 {
-  font-size: 14px;
-  font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 4px;
+  font-size: 13px;
+  font-family: var(--font-family);
+  transition: all 0.2s ease;
+  outline: none;
 }
 
-.onboarding-card p {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-bottom: 12px;
+.onboarding-input:focus {
+  border-color: #007acc;
+  box-shadow: none;
 }
 
-.onboarding-card code {
-  color: #fafafa;
-  background: var(--bg-card);
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-
-.onboarding-input-row {
+.onboarding-eye-btn {
+  position: absolute;
+  right: 6px;
+  width: 26px;
+  height: 26px;
   display: flex;
-  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.onboarding-eye-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-subtle);
+}
+
+.onboarding-error-msg {
+  background: rgba(203, 61, 61, 0.12);
+  border: 1px solid rgba(203, 61, 61, 0.3);
+  color: #ff6b6b;
+  font-size: 11.5px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  line-height: 1.4;
+}
+
+.onboarding-submit-btn {
+  height: 38px;
+  width: 100%;
+  background: #007acc;
+  color: #ffffff;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background-color 0.15s ease;
+  margin-top: 4px;
+}
+
+.onboarding-submit-btn:hover {
+  background: #0062a3;
+  box-shadow: none;
+  transform: none;
+}
+
+.onboarding-submit-btn:active {
+  background: #00558f;
+  transform: none;
+  box-shadow: none;
+}
+
+.onboarding-footer-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.onboarding-footer {
+  position: absolute;
+  bottom: 14px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted, #71717a);
+  opacity: 0.55;
+  user-select: none;
+  letter-spacing: 0.4px;
+  font-weight: 500;
+  transition: opacity 0.2s ease, color 0.2s ease;
+  pointer-events: auto;
+}
+
+.onboarding-footer:hover {
+  opacity: 0.9;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+/* Fallback legacy inline onboarding card */
+.onboarding-card {
+  display: none !important;
 }
 
 /* Main Content Area */

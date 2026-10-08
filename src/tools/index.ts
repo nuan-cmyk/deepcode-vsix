@@ -87,7 +87,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'get_diagnostics',
-      description: 'Retrieve active language server diagnostics (syntax errors, type issues, linter warnings) from VS Code.',
+      description: 'Retrieve active language server diagnostics (syntax errors, type issues, linter warnings).',
       parameters: {
         type: 'object',
         properties: {

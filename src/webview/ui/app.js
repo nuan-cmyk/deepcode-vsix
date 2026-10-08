@@ -160,7 +160,11 @@ const I18N = {
     lblCyrillicRatio: 'Cyrillic Chars/Token Ratio:',
     lblLatinRatio: 'Latin/Code Chars/Token Ratio:',
     lblSaveBtn: 'Save',
-    lblTestConn: 'Test'
+    lblTestConn: 'Test',
+    lblDebugSec: 'Debug',
+    lblResetTokenTitle: 'Reset Auth Token',
+    lblResetTokenDesc: 'Clears saved API key so the onboarding login screen appears on window reload.',
+    lblResetTokenBtn: 'Reset Token'
   },
   ru: {
     lblGeneralSec: 'Основные настройки',
@@ -290,7 +294,11 @@ const I18N = {
     lblCyrillicRatio: 'Символов/токен (Кириллица):',
     lblLatinRatio: 'Символов/токен (Латиница/Код):',
     lblSaveBtn: 'Сохранить',
-    lblTestConn: 'Проверить'
+    lblTestConn: 'Проверить',
+    lblDebugSec: 'Отладка (Debug)',
+    lblResetTokenTitle: 'Сброс API-токена',
+    lblResetTokenDesc: 'Удаляет сохранённый ключ, чтобы при перезагрузке окна открылся экран входа.',
+    lblResetTokenBtn: 'Сбросить токен'
   }
 };
 
@@ -400,6 +408,7 @@ function applyLanguage(lang) {
   try {
     localStorage.setItem('deepcode_lang', lang);
   } catch {}
+  vscode.postMessage({ command: 'setLanguage', lang: lang });
 
   const elMap = [
     ['drawerNewChatText', 'newConversation'],
@@ -457,7 +466,11 @@ function applyLanguage(lang) {
     ['tokenDetailContextLabel', 'detailContext'],
     ['tokenDetailPromptLabel', 'detailPrompt'],
     ['tokenDetailCompactLabel', 'detailCompact'],
-    ['lblOpenLogs', 'openLogs']
+    ['lblOpenLogs', 'openLogs'],
+    ['lblDebugSec', 'lblDebugSec'],
+    ['lblResetTokenTitle', 'lblResetTokenTitle'],
+    ['lblResetTokenDesc', 'lblResetTokenDesc'],
+    ['lblResetTokenBtn', 'lblResetTokenBtn']
   ];
 
   for (const [id, key] of elMap) {
@@ -624,9 +637,29 @@ const messagesList = document.getElementById('messagesList');
 const serverIndicator = document.getElementById('serverIndicator');
 
 // DOM Elements - Onboarding
+const onboardingOverlay = document.getElementById('onboardingOverlay');
+const onboardingMascot = document.getElementById('onboardingMascot');
 const onboardingBanner = document.getElementById('onboardingBanner');
 const onboardingTokenInput = document.getElementById('onboardingTokenInput');
 const onboardingSaveBtn = document.getElementById('onboardingSaveBtn');
+const toggleTokenVisibilityBtn = document.getElementById('toggleTokenVisibilityBtn');
+const onboardingServerToggleBtn = document.getElementById('onboardingServerToggleBtn');
+const onboardingServerSection = document.getElementById('onboardingServerSection');
+const onboardingServerUrlInput = document.getElementById('onboardingServerUrlInput');
+const onboardingError = document.getElementById('onboardingError');
+const tickerWord = document.getElementById('tickerWord');
+
+function setOnboardingVisible(visible) {
+  if (onboardingOverlay) {
+    onboardingOverlay.style.display = visible ? 'flex' : 'none';
+    if (visible && onboardingTokenInput) {
+      setTimeout(() => onboardingTokenInput.focus(), 60);
+    }
+  }
+  if (onboardingBanner) {
+    onboardingBanner.style.display = 'none';
+  }
+}
 
 // DOM Elements - Composer & Mode Toggles
 const promptInput = document.getElementById('promptInput');
@@ -1091,6 +1124,18 @@ if (openLogsBtn) {
   });
 }
 
+const resetTokenBtn = document.getElementById('resetTokenBtn');
+if (resetTokenBtn) {
+  resetTokenBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    resetTokenBtn.classList.add('done');
+    const resetText = (typeof currentLang !== 'undefined' && currentLang === 'ru') ? 'Токен сброшен ✓' : 'Token reset ✓';
+    resetTokenBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><polyline points="20 6 9 17 4 12"/></svg><span>${resetText}</span>`;
+    vscode.postMessage({ command: 'resetToken' });
+  });
+}
+
 if (checkUpdateBtn) {
   checkUpdateBtn.addEventListener('click', () => {
     if (updateStatusText) {
@@ -1373,9 +1418,107 @@ if (tokenSetupSaveBtn) {
   });
 }
 
+if (onboardingMascot && window.DEEPCHAN_URI) {
+  onboardingMascot.src = window.DEEPCHAN_URI;
+}
+
+if (tickerWord) {
+  const tickerWords = [
+    'code',
+    'analyze',
+    'architect',
+    'refactor',
+    'build',
+    'generate',
+    'optimize',
+    'debug',
+    'synthesize',
+    'automate',
+    'explore',
+    'ship'
+  ];
+  let tickerIdx = 0;
+  setInterval(() => {
+    tickerWord.style.transition = 'transform 0.16s ease-in, opacity 0.16s ease-in';
+    tickerWord.style.transform = 'translateY(-100%)';
+    tickerWord.style.opacity = '0';
+
+    setTimeout(() => {
+      tickerIdx = (tickerIdx + 1) % tickerWords.length;
+      tickerWord.textContent = tickerWords[tickerIdx];
+      tickerWord.style.transition = 'none';
+      tickerWord.style.transform = 'translateY(100%)';
+      tickerWord.style.opacity = '0';
+
+      void tickerWord.offsetHeight;
+
+      tickerWord.style.transition = 'transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.18s ease-out';
+      tickerWord.style.transform = 'translateY(0)';
+      tickerWord.style.opacity = '1';
+    }, 160);
+  }, 1400);
+}
+
+if (toggleTokenVisibilityBtn && onboardingTokenInput) {
+  toggleTokenVisibilityBtn.addEventListener('click', () => {
+    if (onboardingTokenInput.type === 'password') {
+      onboardingTokenInput.type = 'text';
+      toggleTokenVisibilityBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9.88 9.88 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>`;
+    } else {
+      onboardingTokenInput.type = 'password';
+      toggleTokenVisibilityBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`;
+    }
+  });
+}
+
+if (onboardingTokenInput) {
+  onboardingTokenInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      onboardingSaveBtn?.click();
+    }
+  });
+  onboardingTokenInput.addEventListener('input', () => {
+    if (onboardingError && onboardingError.style.display !== 'none') {
+      onboardingError.style.display = 'none';
+    }
+  });
+}
+
+if (onboardingServerUrlInput) {
+  onboardingServerUrlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      onboardingSaveBtn?.click();
+    }
+  });
+}
+
 if (onboardingSaveBtn) {
   onboardingSaveBtn.addEventListener('click', () => {
-    saveCredentials(onboardingTokenInput.value, serverUrlInput.value, modelSettingSelect.value);
+    const key = onboardingTokenInput ? onboardingTokenInput.value.trim() : '';
+    if (!key) {
+      if (onboardingError) {
+        onboardingError.textContent = currentLang === 'ru' ? 'Пожалуйста, введите ваш API-токен.' : 'Please enter your API token.';
+        onboardingError.style.display = 'block';
+      }
+      onboardingTokenInput?.focus();
+      return;
+    }
+    if (/[^\x00-\x7F]/.test(key)) {
+      if (onboardingError) {
+        onboardingError.textContent = currentLang === 'ru'
+          ? 'Введённый токен содержит русские буквы! Переключите раскладку на английскую.'
+          : 'Token contains invalid non-ASCII characters.';
+        onboardingError.style.display = 'block';
+      }
+      return;
+    }
+    if (onboardingError) onboardingError.style.display = 'none';
+    const targetUrl = (onboardingServerUrlInput && onboardingServerUrlInput.value.trim())
+      || (serverUrlInput && serverUrlInput.value.trim())
+      || 'https://api.thenck4.ru/v1';
+    saveCredentials(key, targetUrl, modelSettingSelect ? modelSettingSelect.value : 'deepseek-chat');
   });
 }
 
@@ -1431,7 +1574,8 @@ function saveCredentials(key, url, model) {
     apiKey: cleanKey,
     baseUrl: url ? url.trim() : 'https://api.thenck4.ru/v1',
     model: model || 'deepseek-chat',
-    defaults: defaults
+    defaults: defaults,
+    lang: currentLang
   });
 }
 
@@ -1711,7 +1855,7 @@ function isInternalMessage(m) {
 function appendInternalDebugMessage(text, label = 'internal_prompt') {
   if (!text) return;
   emptyState.style.display = 'none';
-  onboardingBanner.style.display = 'none';
+  setOnboardingVisible(false);
 
   const row = document.createElement('div');
   row.className = 'message-row internal-debug-row';
@@ -1770,7 +1914,7 @@ function appendUserMessage(text, timestamp) {
   }
 
   emptyState.style.display = 'none';
-  onboardingBanner.style.display = 'none';
+  setOnboardingVisible(false);
   const row = document.createElement('div');
   row.className = 'message-row user-row';
 
@@ -1796,7 +1940,7 @@ function appendUserMessage(text, timestamp) {
 
 function ensureAssistantMessage(timestamp) {
   emptyState.style.display = 'none';
-  onboardingBanner.style.display = 'none';
+  setOnboardingVisible(false);
   if (!currentAssistantMsgEl) {
     const row = document.createElement('div');
     row.className = 'message-row assistant-row';
@@ -2877,6 +3021,7 @@ window.addEventListener('message', (event) => {
           modeStates.debugMode = Boolean(msg.defaults.debugMode);
           applyDebugModeUI();
         }
+        setOnboardingVisible(false);
         closeSettingsView();
         break;
 
@@ -2987,12 +3132,7 @@ window.addEventListener('message', (event) => {
         modelSettingSelect.value = msg.session.model;
       }
 
-      if (!msg.hasApiKey) {
-        onboardingBanner.style.display = 'block';
-        onboardingTokenInput.focus();
-      } else {
-        onboardingBanner.style.display = 'none';
-      }
+      setOnboardingVisible(!msg.hasApiKey);
 
       messagesList.innerHTML = '';
       currentAssistantMsgEl = null;
@@ -3421,13 +3561,20 @@ window.addEventListener('message', (event) => {
 
     case 'authSaved':
       closeSettingsView();
-      onboardingBanner.style.display = 'none';
+      setOnboardingVisible(false);
       if (tokenSetupInput && msg.apiKey) {
         tokenSetupInput.value = msg.apiKey;
       }
       if (serverIndicator && msg.baseUrl) {
         serverIndicator.textContent = msg.baseUrl;
       }
+      break;
+
+    case 'tokenReset':
+      if (tokenSetupInput) tokenSetupInput.value = '';
+      if (onboardingTokenInput) onboardingTokenInput.value = '';
+      closeSettingsView();
+      setOnboardingVisible(true);
       break;
 
     case 'healthResult':

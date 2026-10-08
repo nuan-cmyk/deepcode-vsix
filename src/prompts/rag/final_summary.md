@@ -16,7 +16,7 @@ When all plan items are verified, tests pass, and diagnostics report 0 errors, D
    - Result: All tests passed successfully (exit code 0).
 
 3. **[Verification and Diagnostics]**:
-   - Checked syntax and types via VS Code language server (`get_diagnostics`).
+   - Checked syntax and types via language server (`get_diagnostics`).
    - Clean report (0 errors, 0 warnings).
 
 The code is verified and ready for use.

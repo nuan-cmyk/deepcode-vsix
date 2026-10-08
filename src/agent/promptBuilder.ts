@@ -48,7 +48,7 @@ export class PromptBuilder {
     // If agent mode is disabled, use lightweight chat assistant prompt
     if (options && options.agentMode === false) {
       const chatPrompt = this.getModeSnippet('chat_mode');
-      return chatPrompt || "You are DeepCode agent, an intelligent programming assistant operating in VS Code. Whenever asked who you are, identify yourself strictly as 'DeepCode agent'. Match the user's language. NO EMOJIS. Keep explanations concise, accurate, and direct.";
+      return chatPrompt || "You are DeepCode agent, an intelligent programming assistant. Whenever asked who you are, identify yourself strictly as 'DeepCode agent'. Match the user's language. NO EMOJIS. Keep explanations concise, accurate, and direct.";
     }
 
     // Base prompt from DEEPSEEK.md
@@ -58,7 +58,7 @@ export class PromptBuilder {
     if (fs.existsSync(basePromptPath)) {
       systemPrompt = await fs.promises.readFile(basePromptPath, 'utf-8');
     } else {
-      systemPrompt = 'You are DeepCode agent, an elite autonomous software engineering assistant operating in VS Code. Whenever asked who or what you are, identify yourself strictly as DeepCode agent.';
+      systemPrompt = 'You are DeepCode agent, an elite autonomous software engineering assistant. Whenever asked who or what you are, identify yourself strictly as DeepCode agent.';
     }
 
     // Embed active project context

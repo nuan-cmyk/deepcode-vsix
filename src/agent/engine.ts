@@ -578,7 +578,7 @@ export class AgentEngine {
                 }
 
                 const reminderFooter = `\n\n[SYSTEM REMINDER]
-- Identity: DeepCode agent, autonomous software engineering AI in VS Code.
+- Identity: DeepCode agent, autonomous software engineering AI.
 - Workspace: ${wsRoot} (OS: ${process.platform})
 - Active File: ${activeFileDesc}
 - Sandbox Mode: ${effectiveSandbox.toUpperCase()}
@@ -1483,7 +1483,7 @@ Re-generate your response now with the proper tool call:`,
             const autoHealingMsg: ChatMessage = {
               id: 'healing_' + Date.now(),
               role: 'tool',
-              content: `[SELF-HEALING] VS Code detected syntax/type diagnostics in '${lastTouchedFile}':\n${diagResult.output}\n\nPlease fix these errors using replace_file_content until clean.`,
+              content: `[SELF-HEALING] Language server detected syntax/type diagnostics in '${lastTouchedFile}':\n${diagResult.output}\n\nPlease fix these errors using replace_file_content until clean.`,
               timestamp: Date.now()
             };
             this.sessionManager.addMessage(autoHealingMsg);
