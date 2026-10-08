@@ -7,6 +7,79 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- Fullscreen Onboarding & Login Overlay (when no API token) -->
+  <div id="onboardingOverlay" class="onboarding-overlay" style="display: none;">
+    <div class="onboarding-modal-card">
+      <div class="onboarding-hero">
+        <div class="onboarding-mascot-col">
+          <img id="onboardingMascot" src="" alt="deepchan" class="onboarding-mascot-img" />
+        </div>
+        <div class="onboarding-brand-col">
+          <div class="onboarding-brand-deep">deep</div>
+          <div class="onboarding-ticker-box">
+            <span id="tickerWord" class="onboarding-ticker-word">code</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="onboarding-form">
+        <div class="onboarding-input-group">
+          <label for="onboardingTokenInput" class="onboarding-label">Token</label>
+          <div class="onboarding-input-wrapper">
+            <svg class="onboarding-input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/>
+              <path d="m21 2-9.6 9.6"/>
+              <circle cx="7.5" cy="15.5" r="5.5"/>
+            </svg>
+            <input
+              type="password"
+              id="onboardingTokenInput"
+              class="onboarding-input"
+              placeholder="sk-... или th-web-..."
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button type="button" id="toggleTokenVisibilityBtn" class="onboarding-eye-btn" title="Показать/скрыть токен">
+              <svg id="eyeIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="onboarding-input-group">
+          <label for="onboardingServerUrlInput" class="onboarding-label">Base URL</label>
+          <div class="onboarding-input-wrapper">
+            <svg class="onboarding-input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+              <path d="M2 12h20"/>
+            </svg>
+            <input
+              type="text"
+              id="onboardingServerUrlInput"
+              class="onboarding-input"
+              value="https://api.thenck4.ru/v1"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+        </div>
+
+        <div id="onboardingError" class="onboarding-error-msg" style="display: none;"></div>
+
+        <button type="button" id="onboardingSaveBtn" class="onboarding-submit-btn">
+          <span>Войти и начать</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="onboarding-footer">by c4w</div>
+  </div>
+
   <!-- Top Navigation Header -->
   <header class="top-nav">
     <div class="top-nav-left">
@@ -317,6 +390,26 @@
                 </div>
               </div>
             </div>
+
+            <!-- 6. Debug Section -->
+            <div class="settings-subsec" style="margin-top: 14px;">
+              <span class="settings-subsec-title">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-bug"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>
+                <span id="lblDebugSec">Debug</span>
+              </span>
+              <div class="settings-fields-grid" style="grid-template-columns: 1fr;">
+                <div class="settings-field-group" style="display: flex; flex-direction: row; align-items: center; justify-content: space-between; padding: 6px 0;">
+                  <div>
+                    <div style="font-weight: 500; font-size: 12px; color: var(--text-primary);" id="lblResetTokenTitle">Reset Auth Token</div>
+                    <div style="font-size: 11px; color: var(--text-secondary);" id="lblResetTokenDesc">Clears saved API key so the onboarding login screen appears on window reload.</div>
+                  </div>
+                  <button type="button" id="resetTokenBtn" class="reset-token-btn">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                    <span id="lblResetTokenBtn">Reset Token</span>
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </details>
 
@@ -331,27 +424,15 @@
             <span id="lblSaveBtn">Save</span>
           </button>
         </div>
+
+        <div class="settings-footer-credits">by c4w</div>
       </div>
     </div>
   </div>
 
   <!-- Chat Messages Stream -->
   <main id="chatContainer" class="chat-container">
-    <!-- Unauthenticated Onboarding Card -->
-    <div id="onboardingBanner" class="onboarding-card" style="display: none;">
-      <div class="onboarding-icon">
-        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-key">
-          <path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/>
-          <path d="m21 2-9.6 9.6"/>
-          <circle cx="7.5" cy="15.5" r="5.5"/>
-        </svg>
-      </div>
-      <h3 id="onboardingTitle">Connect to DeepCode</h3>
-      <div class="onboarding-input-row">
-        <input type="text" id="onboardingTokenInput" class="auth-input blurred-token" placeholder="Paste your sk-... token" autocomplete="off" spellcheck="false" />
-        <button id="onboardingSaveBtn" class="auth-save-btn">Connect</button>
-      </div>
-    </div>
+    <!-- Empty State -->
 
     <!-- Empty State -->
     <div id="emptyState" class="empty-state">

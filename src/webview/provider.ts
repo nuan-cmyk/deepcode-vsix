@@ -20,6 +20,7 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
   private client: DeepSeekClient;
   private toolExecutor: ToolExecutor;
   private pendingPermissionRequests = new Map<string, (decision: 'run_once' | 'always_allow' | 'deny') => void>();
+  private userLang: string = vscode.env.language.startsWith('ru') ? 'ru' : 'en';
 
   public handleOpenSettings() {
     if (this.view) {
@@ -288,11 +289,12 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
         }
 
         case 'browseFolder': {
+          const isRu = (this.userLang === 'ru');
           const uris = await vscode.window.showOpenDialog({
             canSelectFiles: false,
             canSelectFolders: true,
             canSelectMany: false,
-            openLabel: 'Выбрать папку проекта'
+            openLabel: isRu ? 'Выбрать папку проекта' : 'Select Project Folder'
           });
           if (uris && uris.length > 0) {
             this.view?.webview.postMessage({
@@ -366,13 +368,42 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
           });
           this.sessionManager.updateModel(newModel);
 
-          vscode.window.showInformationMessage(`DeepSeek подключен к ${newUrl}!`);
+          if (data.lang) {
+            this.userLang = data.lang;
+          }
+          const isRu = (this.userLang === 'ru');
+          const msg = isRu ? `DeepCode подключен к ${newUrl}!` : `DeepCode connected to ${newUrl}!`;
+          vscode.window.showInformationMessage(msg);
           this.view?.webview.postMessage({
             type: 'authSaved',
             hasApiKey: true,
             apiKey: newKey,
             baseUrl: newUrl,
             defaults: this.sessionManager.getDefaultSettings()
+          });
+          break;
+        }
+
+        case 'setLanguage': {
+          if (data.lang) {
+            this.userLang = data.lang;
+          }
+          break;
+        }
+
+        case 'resetToken': {
+          await this.extensionContext.secrets.delete('deepseek_api_key');
+          const config = vscode.workspace.getConfiguration('deepseek');
+          const baseUrl = config.get<string>('baseUrl', 'https://api.thenck4.ru/v1');
+          this.client.updateConfig(baseUrl, '');
+          const isRu = (this.userLang === 'ru');
+          vscode.window.showInformationMessage(
+            isRu
+              ? 'API-токен сброшен. При перезагрузке окна появится экран авторизации.'
+              : 'API token reset. Onboarding login screen will appear on reload.'
+          );
+          this.view?.webview.postMessage({
+            type: 'tokenReset'
           });
           break;
         }
@@ -431,7 +462,8 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
               const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(full));
               await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.One });
             } catch {
-              vscode.window.showErrorMessage(`Не удалось открыть файл: ${data.path}`);
+              const isRu = (this.userLang === 'ru');
+              vscode.window.showErrorMessage(isRu ? `Не удалось открыть файл: ${data.path}` : `Failed to open file: ${data.path}`);
             }
           }
           break;
@@ -899,10 +931,12 @@ export class DeepSeekViewProvider implements vscode.WebviewViewProvider {
     const stylesUri = webview.asWebviewUri(vscode.Uri.file(path.join(uiDir, 'styles.css')));
     const appJsUri = webview.asWebviewUri(vscode.Uri.file(path.join(uiDir, 'app.js')));
     const fileIconsUri = webview.asWebviewUri(vscode.Uri.file(path.join(uiDir, 'file-icons')));
+    const deepchanUri = webview.asWebviewUri(vscode.Uri.file(path.join(this.extensionContext.extensionPath, 'media', 'deepchan_r.webp')));
 
     html = html.replace('href="styles.css"', `href="${stylesUri}?v=${now}"`);
     html = html.replace('src="app.js"', `src="${appJsUri}?v=${now}"`);
-    html = html.replace('</head>', `<script>window.FILE_ICONS_URI = "${fileIconsUri}";</script></head>`);
+    html = html.replace('</head>', `<script>window.FILE_ICONS_URI = "${fileIconsUri}"; window.DEEPCHAN_URI = "${deepchanUri}";</script></head>`);
+    html = html.replace('id="onboardingMascot" src=""', `id="onboardingMascot" src="${deepchanUri}"`);
 
     return html;
   }

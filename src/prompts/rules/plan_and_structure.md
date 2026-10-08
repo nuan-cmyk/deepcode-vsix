@@ -39,7 +39,7 @@ project_name/
 4. [ ] Develop main application entrypoint main.py
 5. [ ] Write unit tests in tests/test_engine.py
 6. [ ] Execute project and tests in terminal (validate exit code 0)
-7. [ ] Verify VS Code language server diagnostics report 0 errors
+7. [ ] Verify language server diagnostics report 0 errors
 </plan>
 
 ### 5. Phase 1 Conclusion

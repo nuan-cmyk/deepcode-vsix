@@ -2,7 +2,7 @@
 	"name": "deepcode",
 	"displayName": "DeepCode",
 	"description": "Autonomous AI Coding Agent with Claude Code UX, Surgical Editing, and Self-Healing Diagnostics",
-	"version": "1.24.91",
+	"version": "1.24.92",
 	"publisher": "sums001",
 	"repository": {
 		"type": "git",
@@ -58,10 +58,7 @@
 			{
 				"command": "deepseek.openSettings",
 				"title": "Settings",
-				"icon": {
-					"light": "media/settings-light.svg",
-					"dark": "media/settings-dark.svg"
-				}
+				"icon": "$(gear)"
 			},
 			{
 				"command": "deepseek.toggleAutoMode",
