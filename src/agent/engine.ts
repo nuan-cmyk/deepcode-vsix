@@ -949,25 +949,17 @@ export class AgentEngine {
           // Detect malformed/improper tool calls for validation and re-generation
           const malformedCheck = this.detectMalformedToolCall(currentAssistantContent, currentReasoningContent, session);
 
-          // An action promise is an IDLE turn only if it's short (< 350 chars) and just promises an action without executing tools or providing a full summary
-          const isShortMonologue = currentAssistantContent.trim().length < 350;
-          const hasActionPromise = isShortMonologue && /(?:let me|i will|i'll|следующий шаг|сейчас\s+(?:я\s+)?(?:создам|отредактирую|изменю|запущу|прочитаю|посмотрю|изучу)|провер(?:ю|им|ить)?|посмотр(?:ю|им|еть)?|изуч(?:у|им|ить)?|прочита(?:ю|ем|ть)?|созда(?:м|дим|вать)?|запу(?:щу|стим|стить)?|start server|run implant)/i.test(currentAssistantContent);
-          
-          const isToolPromiseOnly = Boolean(
-            !hasToolTagAttempt && hasActionPromise
-          );
-
           const isFinalSummary = Boolean(
             !malformedCheck.isMalformed && (
               currentAssistantContent.includes('<end_working>') ||
-              (!hasToolTagAttempt && !isToolPromiseOnly && currentAssistantContent.trim().length > 0)
+              (!hasToolTagAttempt && currentAssistantContent.trim().length > 0)
             )
           );
 
           // Phase 1 Nudge: When in Plan Mode and plan is not yet confirmed
           if (session.agentMode && session.planMode !== false && !session.planConfirmed && !isGenuineQuestion) {
             const hadExplorationTools = (session.messages || []).some(m => m.role === 'tool');
-            const shouldNudgePlan = isToolPromiseOnly || hadExplorationTools || (!currentAssistantContent.trim() && currentReasoningContent);
+            const shouldNudgePlan = hadExplorationTools || (!currentAssistantContent.trim() && currentReasoningContent);
 
             if (shouldNudgePlan && phase1NudgeCount < 2) {
               phase1NudgeCount++;
