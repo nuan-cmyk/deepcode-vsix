@@ -1660,6 +1660,25 @@ code {
   color: var(--text-primary);
 }
 
+.control-label-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.thinking-dead-warn {
+  font-size: 10px;
+  font-weight: 500;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 1.3;
+  letter-spacing: 0.1px;
+}
+
 .control-desc {
   font-size: 10.5px;
   color: var(--text-muted, #71717a);

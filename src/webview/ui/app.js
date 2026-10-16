@@ -59,6 +59,7 @@ const I18N = {
     continueBtn: 'Continue',
     composerPlaceholder: 'Ask anything',
     deadModePlaceholder: 'Ask anything, I SAW ANYTHING',
+    thinkingDeadModeWarn: 'not recomended with dead mode',
     stopTitle: 'Stop generation (Esc)',
     sendTitle: 'Send message',
     thinkingToggle: 'Thinking',
@@ -200,6 +201,7 @@ const I18N = {
     continueBtn: 'Продолжить',
     composerPlaceholder: 'Ask anything',
     deadModePlaceholder: 'Ask anything, I SAW ANYTHING',
+    thinkingDeadModeWarn: 'not recomended with dead mode',
     stopTitle: 'Остановить генерацию (Esc)',
     sendTitle: 'Отправить сообщение',
     thinkingToggle: 'Мышление',
@@ -456,6 +458,7 @@ function applyLanguage(lang) {
     ['onboardingSaveBtn', 'connect'],
     ['serverIndicatorPrefix', 'serverPrefix'],
     ['toggleThinkingText', 'thinkingToggle'],
+    ['thinkingDeadModeWarn', 'thinkingDeadModeWarn'],
     ['toggleSearchText', 'searchToggle'],
     ['togglePlanText', 'planToggle'],
     ['tokenPopoverTitle', 'contextWindow'],
@@ -951,6 +954,12 @@ function updateTogglesUI() {
   if (togglePlan) togglePlan.checked = modeStates.plan !== false;
   updateComposerPlaceholder();
 
+  const isDead = Boolean(modeStates.deadMode || (defDeadMode && defDeadMode.checked) || (toggleDead && toggleDead.checked));
+  const thinkingDeadWarn = document.getElementById('thinkingDeadModeWarn');
+  if (thinkingDeadWarn) {
+    thinkingDeadWarn.style.display = isDead ? 'inline-flex' : 'none';
+  }
+
   // Sandbox section is disabled when agent mode is off
   if (sandboxControlSection) {
     sandboxControlSection.classList.toggle('disabled', !modeStates.agentMode);
@@ -1004,6 +1013,7 @@ if (cableBtn && composerControlsDrawer) {
     const isHidden = composerControlsDrawer.style.display === 'none';
     composerControlsDrawer.style.display = isHidden ? 'block' : 'none';
     cableBtn.classList.toggle('active', isHidden);
+    if (isHidden) updateTogglesUI();
   });
 }
 
@@ -1084,6 +1094,7 @@ function openSettingsView() {
     settingsModal.style.display = 'flex';
     document.body.classList.add('in-settings-view');
     if (healthStatusText) healthStatusText.textContent = '';
+    updateTogglesUI();
   }
 }
 
